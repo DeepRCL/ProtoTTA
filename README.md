@@ -191,11 +191,10 @@ For the generic developer guide for explainable TTA, see [`ProToTTA/VLM_EXPLAINA
 If you find this repository useful, please cite the paper:
 
 ```bibtex
-@inproceedings{prototta2026,
+@inproceedings{abootorabiprototta,
   title={ProtoTTA: Prototype-Guided Test-Time Adaptation},
   author={Abootorabi, Mohammad Mahdi and Mousavi, Parvin and Abolmaesumi, Purang and Shelhamer, Evan},
-  booktitle={To be updated},
-  year={2026}
+  booktitle={Third Workshop on Test-Time Updates (Main Track)}
 }
 ```
 
