@@ -23,6 +23,9 @@ Start with the developer kit in [`ProToTTA/README.md`](./ProToTTA/README.md).
 - Interpretability metrics guide: [`ProToTTA/INTERPRETABILITY_METRICS.md`](./ProToTTA/INTERPRETABILITY_METRICS.md)
 - VLM explainability guide: [`ProToTTA/VLM_EXPLAINABILITY.md`](./ProToTTA/VLM_EXPLAINABILITY.md)
 
+<img width="5490" height="1945" alt="protoTTA_ICLR (5) (1)" src="https://github.com/user-attachments/assets/2931c7ec-1c89-4463-a217-6743a8a06a6f" />
+
+
 ### Run the existing paper implementations
 
 Use the backbone-specific command guide in [`ProToTTA/EXISTING_BACKBONES.md`](./ProToTTA/EXISTING_BACKBONES.md).
