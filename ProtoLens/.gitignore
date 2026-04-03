@@ -1,0 +1,99 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+log_folder/
+
+# SLURM output files
+*.out
+*.err
+
+# Datasets and large data files
+Datasets/
+*.zip
+*.tar.gz
+*.tar
+*.csv
+*.json
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Model checkpoints and weights
+checkpoints/
+models/
+weights/
+*.pth.tar
+*.pt.tar
+
+# PDF files (research papers)
+# *.pdf
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.cache
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Experiment outputs
+outputs/
+results/
+runs/
+
+# Prototype files (if generated)
+prototypes/
+*.prototype
+

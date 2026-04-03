@@ -1,0 +1,53 @@
+\begin{table*}[t!]
+\centering
+\caption{Test-time adaptation performance on Stanford Dogs-C across corruption types. Best results in \textbf{bold}, second-best \underline{underlined}.}
+\label{tab:dogs_results}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l|cccc>{\columncolor{gray!5}}c|cc>{\columncolor{gray!5}}c|ccc>{\columncolor{gray!5}}c|cccc>{\columncolor{gray!5}}c|c}
+\toprule
+& \multicolumn{5}{c|}{\textbf{Noise}} & \multicolumn{3}{c|}{\textbf{Blur}} & \multicolumn{4}{c|}{\textbf{Weather}} & \multicolumn{5}{c|}{\textbf{Digital}} & \\
+\textbf{Method} & Gauss & Shot & Impul & Speck & \textbf{Avg} & Defoc & Gauss & \textbf{Avg} & Brit & Fog & Frost & \textbf{Avg} & Contr & Elast & Jpeg & Pixel & \textbf{Avg} & \textbf{Total} \\
+\midrule
+\multicolumn{19}{c}{\textit{\textbf{Backbone: ProtoPFormer ~|~ Dataset: Stanford Dogs-C}}} \\
+\midrule
+Tent & \underline{52.7} & 51.8 & \textbf{54.7} & 60.7 & 55.0 & 45.8 & 42.3 & 44.1 & \textbf{68.3} & 60.4 & 53.8 & 60.8 & \underline{49.3} & 64.9 & \underline{67.1} & \underline{70.6} & \underline{63.0} & 57.1 \scriptsize{$\pm$ 8.6} \\
+EATA & 52.0 & \underline{53.3} & 53.4 & 60.5 & 54.8 & 46.7 & 43.7 & 45.2 & 68.2 & 59.7 & 52.9 & 60.3 & \textbf{49.5} & 65.3 & \textbf{67.2} & \textbf{70.7} & \textbf{63.2} & 57.2 \scriptsize{$\pm$ 8.4} \\
+\rowcolor{gray!10}
+\textbf{\textit{ProtoTTA}} & 51.2 & 52.1 & 52.7 & 60.8 & 54.2 & 45.9 & \underline{44.1} & 45.0 & 66.3 & 59.7 & 51.9 & 59.3 & 46.9 & 63.9 & 65.8 & 67.7 & 61.1 & 56.1 \scriptsize{$\pm$ 8.0} \\
+\rowcolor{gray!10}
+\textbf{\textit{ProtoTTA+ (0.7/0.3)}} & \textbf{53.8} & 53.1 & 53.9 & \textbf{61.7} & \textbf{55.6} & \underline{47.5} & \textbf{45.0} & \textbf{46.2} & \underline{68.2} & 60.8 & 53.8 & 60.9 & 48.9 & 65.5 & 66.7 & 70.4 & 62.9 & \textbf{57.6 \scriptsize{$\pm$ 8.1}} \\
+\rowcolor{gray!10}
+\textbf{\textit{ProtoTTA+ (0.75/0.25)}} & 52.4 & \textbf{53.6} & \underline{54.1} & \underline{61.5} & \underline{55.4} & 46.7 & 44.0 & 45.3 & 68.0 & \textbf{61.7} & \textbf{54.4} & \textbf{61.4} & 45.6 & \textbf{66.2} & 67.0 & 70.3 & 62.3 & \underline{57.4 \scriptsize{$\pm$ 8.7}} \\
+\rowcolor{gray!10}
+\textbf{\textit{ProtoTTA+ (0.8/0.2)}} & 52.5 & 53.1 & 54.0 & 61.4 & 55.3 & \textbf{47.5} & 43.4 & \underline{45.5} & 67.9 & \underline{61.1} & \underline{53.9} & \underline{61.0} & 46.9 & \underline{66.2} & 66.7 & 68.8 & 62.1 & 57.2 \scriptsize{$\pm$ 8.3} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table*}
+
+\begin{table*}[t]
+\centering
+\caption{Efficiency and interpretability analysis on Stanford Dogs-C.}
+\label{tab:dogs_efficiency}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l|ccc|cc}
+\toprule
+& \multicolumn{3}{c|}{\textbf{Interpretability Metrics}} & \multicolumn{2}{c}{\textbf{Efficiency Metrics}} \\
+\textbf{Method} & \textbf{PAC} $\uparrow$ & \textbf{PCA-W} $\uparrow$ & \textbf{Prediction Stability} $\uparrow$ & \textbf{Selection Rate} $\downarrow$ & \textbf{Rel. Speed} $\uparrow$ \\
+\midrule
+\multicolumn{6}{c}{\textit{\textbf{Backbone: ProtoPFormer ~|~ Dataset: Stanford Dogs-C}}} \\
+\midrule
+Tent & $91.2 $\pm$ 0.2$ & $64.8 $\pm$ 7.3$ & 0.6\% & 100.0\% & N/A \\
+EATA & $91.3 $\pm$ 0.2$ & $65.2 $\pm$ 6.7$ & 0.6\% & 69.9\% & N/A \\
+\rowcolor{gray!10}
+\textbf{\textit{ProtoTTA}} & $91.6 $\pm$ 0.3$ & $62.2 $\pm$ 7.5$ & 0.5\% & 78.6\% & N/A \\
+\rowcolor{gray!10}
+\textbf{\textit{ProtoTTA+ (0.7/0.3)}} & $91.2 $\pm$ 0.2$ & $64.7 $\pm$ 6.9$ & 0.5\% & 71.5\% & N/A \\
+\rowcolor{gray!10}
+\textbf{\textit{ProtoTTA+ (0.75/0.25)}} & $91.2 $\pm$ 0.2$ & $64.2 $\pm$ 7.5$ & 0.5\% & 71.4\% & N/A \\
+\rowcolor{gray!10}
+\textbf{\textit{ProtoTTA+ (0.8/0.2)}} & $91.2 $\pm$ 0.2$ & $64.2 $\pm$ 7.5$ & 0.5\% & 72.1\% & N/A \\
+\bottomrule
+\end{tabular}%
+}
+\end{table*}

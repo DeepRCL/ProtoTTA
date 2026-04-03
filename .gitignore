@@ -1,0 +1,104 @@
+# -----------------------------------------------------------------------------
+# Public release scope
+# -----------------------------------------------------------------------------
+# Keep the ProtoTTA release focused on the main code paths only.
+EATA/
+SAR/
+memo/
+robustness/
+WildNLP/
+InfoDisent/
+
+# -----------------------------------------------------------------------------
+# Embedded/local repository metadata
+# -----------------------------------------------------------------------------
+**/.git
+
+# -----------------------------------------------------------------------------
+# Python / environments
+# -----------------------------------------------------------------------------
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+**/.mypy_cache/
+.hypothesis/
+.tox/
+.coverage
+.coverage.*
+.python-version
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+pip-log.txt
+
+# -----------------------------------------------------------------------------
+# Editor / OS noise
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# -----------------------------------------------------------------------------
+# Datasets, checkpoints, logs, and experiment outputs
+# -----------------------------------------------------------------------------
+logs/
+wandb/
+**/logs/
+**/datasets/
+**/Datasets/
+**/data/
+**/saved_models/
+**/log_folder/
+**/results/
+**/results-*/
+**/results_*/
+**/plots/
+**/plots-*/
+**/plots_*/
+**/output/
+**/output_*/
+**/output_cosine/
+**/output_view/
+**/corruption_visualizations*/
+**/*.pth
+**/*.pt
+**/*.ckpt
+**/*.npy
+**/*.npz
+**/*.tgz
+**/*.tar
+**/*.tar.gz
+**/*.zip
+**/*.rar
+**/*.backup
+
+# -----------------------------------------------------------------------------
+# Generated evaluation artifacts
+# -----------------------------------------------------------------------------
+ProtoViT/readme_stash/
+ProtoViT/ablation_studies/
+ProtoViT/ablation_studies_safe/
+ProtoViT/spatial_alignment_test/
+ProtoViT/results-v1/
+ProtoViT/results-vlm-old/
+ProtoViT/plots_v1/
+ProtoViT/summary_stats-v1.json
+ProtoViT/robustness_results*.json
+ProtoPFormer/robustness_results*.json
+
+# -----------------------------------------------------------------------------
+# Paper drafts / unrelated PDFs
+# -----------------------------------------------------------------------------
+*.pdf
+!ProtoTTA_ICLR2026_TTU (34).pdf
+iclr2026_conference (5).tex
+check_cuda.py

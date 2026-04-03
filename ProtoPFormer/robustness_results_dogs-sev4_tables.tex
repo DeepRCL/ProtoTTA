@@ -1,0 +1,57 @@
+\begin{table*}[t!]
+\centering
+\caption{Test-time adaptation performance on Stanford Dogs-C across corruption types. Best results in \textbf{bold}, second-best \underline{underlined}.}
+\label{tab:dogs_results}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l|cccc>{\columncolor{gray!5}}c|cc>{\columncolor{gray!5}}c|ccc>{\columncolor{gray!5}}c|cccc>{\columncolor{gray!5}}c|c}
+\toprule
+& \multicolumn{5}{c|}{\textbf{Noise}} & \multicolumn{3}{c|}{\textbf{Blur}} & \multicolumn{4}{c|}{\textbf{Weather}} & \multicolumn{5}{c|}{\textbf{Digital}} & \\
+\textbf{Method} & Gauss & Shot & Impul & Speck & \textbf{Avg} & Defoc & Gauss & \textbf{Avg} & Brit & Fog & Frost & \textbf{Avg} & Contr & Elast & Jpeg & Pixel & \textbf{Avg} & \textbf{Total} \\
+\midrule
+\multicolumn{19}{c}{\textit{\textbf{Backbone: ProtoPFormer ~|~ Dataset: Stanford Dogs-C}}} \\
+\midrule
+Unadapted & 59.0 & 55.3 & 58.9 & 62.7 & 59.0 & 50.5 & 54.4 & 52.5 & \textbf{75.2} & 63.5 & 53.3 & 64.0 & \textbf{68.0} & \textbf{76.2} & \textbf{74.4} & \textbf{75.3} & \textbf{73.4} & 63.6 \scriptsize{$\pm$ 8.9} \\
+Tent & 62.3 & 59.7 & 62.0 & 66.6 & 62.7 & 54.8 & 57.4 & 56.1 & 73.2 & 67.8 & 57.4 & \underline{66.1} & 65.9 & \underline{75.6} & 72.4 & 73.5 & 71.8 & \underline{65.3 \scriptsize{$\pm$ 6.7}} \\
+EATA & 62.1 & 59.0 & \textbf{62.5} & 65.9 & 62.4 & 54.9 & 57.2 & 56.0 & \underline{73.5} & 67.6 & 57.3 & 66.1 & \underline{67.0} & 75.2 & \underline{72.4} & \underline{73.8} & \underline{72.1} & 65.3 \scriptsize{$\pm$ 6.8} \\
+SAR & 41.0 & 42.4 & 49.7 & 55.4 & 47.2 & 30.2 & 37.5 & 33.9 & 37.0 & 39.9 & 38.7 & 38.5 & 52.0 & 42.2 & 36.9 & 51.3 & 45.6 & 42.6 \scriptsize{$\pm$ 7.1} \\
+\rowcolor{gray!10}
+\textbf{\textit{ProtoTTA}} & 61.6 & 59.4 & 61.1 & 65.2 & 61.8 & 52.2 & 55.3 & 53.8 & 71.1 & 66.9 & 56.9 & 65.0 & 64.5 & 73.2 & 70.7 & 70.9 & 69.8 & 63.8 \scriptsize{$\pm$ 6.4} \\
+\rowcolor{gray!10}
+\textbf{\textit{ProtoTTA+ (0.7/0.3)}} & \underline{63.0} & \underline{60.6} & 61.8 & 66.2 & 62.9 & \underline{55.1} & \underline{57.5} & \underline{56.3} & 72.2 & \textbf{68.4} & \underline{58.0} & \textbf{66.2} & 64.9 & 75.3 & 71.7 & 72.6 & 71.1 & 65.2 \scriptsize{$\pm$ 6.3} \\
+\rowcolor{gray!10}
+\textbf{\textit{ProtoTTA+ (0.75/0.25)}} & \textbf{63.3} & 60.3 & \underline{62.4} & \underline{66.8} & \textbf{63.2} & 54.4 & 57.4 & 55.9 & 71.9 & 67.8 & \textbf{58.0} & 65.9 & 65.3 & 73.8 & 71.4 & 72.8 & 70.8 & 65.0 \scriptsize{$\pm$ 6.1} \\
+\rowcolor{gray!10}
+\textbf{\textit{ProtoTTA+ (0.8/0.2)}} & 62.3 & \textbf{61.2} & 62.2 & \textbf{67.1} & \underline{63.2} & \textbf{55.7} & \textbf{57.7} & \textbf{56.7} & 72.3 & \underline{68.4} & 56.8 & 65.8 & 66.1 & 74.3 & 72.0 & 72.9 & 71.3 & \textbf{65.3 \scriptsize{$\pm$ 6.2}} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table*}
+
+\begin{table*}[t]
+\centering
+\caption{Efficiency and interpretability analysis on Stanford Dogs-C.}
+\label{tab:dogs_efficiency}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l|ccc|cc}
+\toprule
+& \multicolumn{3}{c|}{\textbf{Interpretability Metrics}} & \multicolumn{2}{c}{\textbf{Efficiency Metrics}} \\
+\textbf{Method} & \textbf{PAC} $\uparrow$ & \textbf{PCA-W} $\uparrow$ & \textbf{Prediction Stability} $\uparrow$ & \textbf{Selection Rate} $\downarrow$ & \textbf{Rel. Speed} $\uparrow$ \\
+\midrule
+\multicolumn{6}{c}{\textit{\textbf{Backbone: ProtoPFormer ~|~ Dataset: Stanford Dogs-C}}} \\
+\midrule
+Unadapted & $93.3 $\pm$ 0.2$ & $N/A$ & $N/A$ & N/A & 100.0\% \\
+Tent & $92.6 $\pm$ 0.1$ & $N/A$ & $N/A$ & N/A & 74.5\% \\
+EATA & $92.7 $\pm$ 0.2$ & $N/A$ & $N/A$ & N/A & 71.2\% \\
+SAR & $94.5 $\pm$ 0.2$ & $N/A$ & $N/A$ & N/A & 94.5\% \\
+\rowcolor{gray!10}
+\textbf{\textit{ProtoTTA}} & $93.0 $\pm$ 0.2$ & $N/A$ & $N/A$ & N/A & 74.3\% \\
+\rowcolor{gray!10}
+\textbf{\textit{ProtoTTA+ (0.7/0.3)}} & $92.6 $\pm$ 0.2$ & $N/A$ & $N/A$ & N/A & 55.7\% \\
+\rowcolor{gray!10}
+\textbf{\textit{ProtoTTA+ (0.75/0.25)}} & $92.6 $\pm$ 0.1$ & $N/A$ & $N/A$ & N/A & 64.0\% \\
+\rowcolor{gray!10}
+\textbf{\textit{ProtoTTA+ (0.8/0.2)}} & $92.6 $\pm$ 0.1$ & $N/A$ & $N/A$ & N/A & 75.5\% \\
+\bottomrule
+\end{tabular}%
+}
+\end{table*}

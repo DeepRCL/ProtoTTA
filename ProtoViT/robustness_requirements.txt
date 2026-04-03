@@ -1,0 +1,20 @@
+# Additional requirements for robustness testing with ImageNet-C style corruptions
+# Install these in addition to the main requirements.txt
+
+# Core corruption dependencies
+scikit-image>=0.19.0
+opencv-python>=4.5.0
+scipy>=1.7.0
+Wand>=0.6.7  # ImageMagick Python bindings
+
+# For better progress visualization
+tqdm>=4.62.0
+
+# Note: You also need ImageMagick installed on your system
+# Ubuntu/Debian: sudo apt-get install libmagickwand-dev imagemagick
+# macOS: brew install imagemagick
+# 
+# If you have issues with Wand/ImageMagick, the basic corruptions
+# (noise, blur, contrast, brightness, etc.) will still work, but
+# motion_blur and snow effects will be disabled.
+

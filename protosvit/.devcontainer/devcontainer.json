@@ -1,0 +1,60 @@
+{
+    "name": "protos-vit",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "postCreateCommand": "if test -f \"./pyproject.toml\"; then pdm install; fi;",
+    "customizations": {
+        "vscode": {
+            "settings": {
+                // Basic formating
+                "editor.formatOnSave": true,
+                "files.trimFinalNewlines": true,
+                "files.trimTrailingWhitespace": true,
+                "files.insertFinalNewline": true,
+                "editor.tabSize": 4,
+                // Python
+                "python.defaultInterpreterPath": "./.venv/bin/python",
+                "python.autoComplete.extraPaths": [
+                    "./.venv/lib/python3.10/site-packages",
+                    "./src"
+                ],
+                "python.analysis.extraPaths": [
+                    "./.venv/lib/python3.10/site-packages",
+                    "./src"
+                ],
+                "[python]": {
+                    "editor.defaultFormatter": "charliermarsh.ruff"
+                },
+                "pylint.args": [
+                    "--disable=unused-import,line-too-long,wrong-import-order,missing-module-docstring,missing-class-docstring,missing-function-docstring",
+                    "--extension-pkg-whitelist=pydantic"
+                ],
+                "mypy-type-checker.args": [
+                    "--check-untyped-defs"
+                ]
+            },
+            "extensions": [
+                "charliermarsh.ruff",
+                "njqdev.vscode-python-typehint",
+                "knowsuchagency.pdm-task-provider",
+                // qol
+                "tamasfe.even-better-toml",
+                "mrmlnc.vscode-duplicate"
+            ]
+        }
+    },
+    // "mounts": [
+    //     {
+    //         // required for multiprocessing
+    //         "source": "/dev/shm",
+    //         "target": "/dev/shm",
+    //         "type": "bind"
+    //     }
+    // ],
+    // "runArgs": [
+    //     "--ipc=host",
+    //     "--gpus=all",
+    //     "--privileged"
+    // ]
+}

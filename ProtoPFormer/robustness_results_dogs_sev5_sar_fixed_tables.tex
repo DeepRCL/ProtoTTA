@@ -1,0 +1,35 @@
+\begin{table*}[t!]
+\centering
+\caption{Test-time adaptation performance on Stanford Dogs-C across corruption types. Best results in \textbf{bold}, second-best \underline{underlined}.}
+\label{tab:dogs_results}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l|cccc>{\columncolor{gray!5}}c|cc>{\columncolor{gray!5}}c|ccc>{\columncolor{gray!5}}c|cccc>{\columncolor{gray!5}}c|c}
+\toprule
+& \multicolumn{5}{c|}{\textbf{Noise}} & \multicolumn{3}{c|}{\textbf{Blur}} & \multicolumn{4}{c|}{\textbf{Weather}} & \multicolumn{5}{c|}{\textbf{Digital}} & \\
+\textbf{Method} & Gauss & Shot & Impul & Speck & \textbf{Avg} & Defoc & Gauss & \textbf{Avg} & Brit & Fog & Frost & \textbf{Avg} & Contr & Elast & Jpeg & Pixel & \textbf{Avg} & \textbf{Total} \\
+\midrule
+\multicolumn{19}{c}{\textit{\textbf{Backbone: ProtoPFormer ~|~ Dataset: Stanford Dogs-C}}} \\
+\midrule
+SAR & 36.7 & 40.9 & 41.8 & 48.1 & 41.9 & 31.5 & 30.0 & 30.8 & 59.6 & 34.4 & 30.6 & 41.5 & 31.8 & 50.3 & 59.5 & 63.1 & 51.2 & 42.9 \scriptsize{$\pm$ 11.5} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table*}
+
+\begin{table*}[t]
+\centering
+\caption{Efficiency and interpretability analysis on Stanford Dogs-C.}
+\label{tab:dogs_efficiency}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l|ccc|cc}
+\toprule
+& \multicolumn{3}{c|}{\textbf{Interpretability Metrics}} & \multicolumn{2}{c}{\textbf{Efficiency Metrics}} \\
+\textbf{Method} & \textbf{PAC} $\uparrow$ & \textbf{PCA-W} $\uparrow$ & \textbf{Prediction Stability} $\uparrow$ & \textbf{Selection Rate} $\downarrow$ & \textbf{Rel. Speed} $\uparrow$ \\
+\midrule
+\multicolumn{6}{c}{\textit{\textbf{Backbone: ProtoPFormer ~|~ Dataset: Stanford Dogs-C}}} \\
+\midrule
+SAR & $93.8 $\pm$ 0.2$ & $35.3 $\pm$ 11.3$ & 58.0\% & 0.7\% & N/A \\
+\bottomrule
+\end{tabular}%
+}
+\end{table*}
