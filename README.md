@@ -1,14 +1,14 @@
 # ProtoTTA: Prototype-Guided Test-Time Adaptation
 
-[![Paper PDF](https://img.shields.io/badge/Paper-PDF-B31B1B.svg)](./ProtoTTA_ICLR2026_TTU%20(34).pdf)
+[![Paper PDF](https://iclr.cc/virtual/2026/10020241)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.x-ee4c2c.svg)](https://pytorch.org/)
 
 Official code repository for **ProtoTTA: Prototype-Guided Test-Time Adaptation** by **Mohammad Mahdi Abootorabi, Parvin Mousavi, Purang Abolmaesumi, and Evan Shelhamer**.
 
-This repository packages our ProtoTTA implementations across multiple prototype-based backbones, together with robustness evaluation scripts, prototype-level interpretability metrics, and a vision-language-model (VLM) analysis pipeline for studying adaptation dynamics.
+This repository packages our ProtoTTA implementations across multiple prototype-based backbones, together with robustness evaluation scripts, prototype-level interpretability metrics, and a vision-language model (VLM) analysis pipeline for studying adaptation dynamics.
+<img width="3000" height="1425" alt="VLM2" src="https://github.com/user-attachments/assets/291b0af1-e8e8-48f0-8979-0c8194beb152" />
 
-[Paper PDF](./ProtoTTA_ICLR2026_TTU%20(34).pdf)
 
 ## Start Here
 
