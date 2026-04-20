@@ -1,6 +1,6 @@
 # ProtoTTA: Prototype-Guided Test-Time Adaptation
 
-[![Openreview](https://img.shields.io/badge/Paper-PDF-B31B1B.svg)](https://iclr.cc/virtual/2026/10020241)
+[![OpenReview](https://img.shields.io/badge/Paper-PDF-B31B1B.svg)](https://iclr.cc/virtual/2026/10020241)
 [![arXiv](https://img.shields.io/badge/arXiv-Paper-<COLOR>.svg)](https://arxiv.org/abs/2604.15494)
 [![Poster](https://img.shields.io/badge/Poster-PDF-4c1.svg)](https://github.com/DeepRCL/ProtoTTA/blob/main/Files/ProtoTTA-Poster-v3.pdf)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
