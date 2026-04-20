@@ -9,10 +9,10 @@
 Official code repository for **ProtoTTA: Prototype-Guided Test-Time Adaptation**.
 
 This repository packages our ProtoTTA implementations across multiple prototype-based backbones, together with robustness evaluation scripts, prototype-level interpretability metrics, and a vision-language model (VLM) analysis pipeline for studying adaptation dynamics.
-<img width="3000" height="1425" alt="VLM2 (1)" src="https://github.com/user-attachments/assets/498165fc-dcfb-454b-86fb-917b30aec308" />
+<img width="100%" alt="VLM2 (1)" src="https://github.com/user-attachments/assets/498165fc-dcfb-454b-86fb-917b30aec308" />
 
 ## Start Here
-<img width="5490" height="1945" alt="protoTTA_ICLR (7)" src="https://github.com/user-attachments/assets/95239449-27fa-4209-816f-e9f8bc5a3d1f" />
+<img width="100%" src="https://github.com/user-attachments/assets/95239449-27fa-4209-816f-e9f8bc5a3d1f">
 
 This repository supports two main use cases.
 
