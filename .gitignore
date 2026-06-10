@@ -102,3 +102,5 @@ ProtoPFormer/robustness_results*.json
 !ProtoTTA_ICLR2026_TTU (34).pdf
 iclr2026_conference (5).tex
 check_cuda.py
+Files/ProtoTTA-Poster.png
+protosvit/slurm*.out

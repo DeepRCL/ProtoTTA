@@ -199,7 +199,8 @@ class ClassificationModulePrototype(pl.LightningModule):
     def forward(self, x: torch.Tensor, train=False):
         modeloutput_z = self.backbone_project(x)
 
-        similarity = torch.einsum(
+        # Raw cosine similarity: [B, P, spatial] in [-1, 1]
+        cosine_sim = torch.einsum(
             "bic, bnc -> bni",
             F.normalize(modeloutput_z.float(), dim=-1),
             F.normalize(
@@ -208,7 +209,7 @@ class ClassificationModulePrototype(pl.LightningModule):
             ),
         )
 
-        similarity = F.softmax(similarity / (self.temperature), dim=1)
+        similarity = F.softmax(cosine_sim / (self.temperature), dim=1)
         similarity_prototypes = similarity * self.mask_proto[None, :, None]
         similarity_background = similarity * (1 - self.mask_proto[None, :, None])
         # Keep a pre-head prototype score for TTA filtering. This stays on the
@@ -250,6 +251,7 @@ class ClassificationModulePrototype(pl.LightningModule):
             "similarity_background": similarity_background,
             "similarity_score": similarity_score,
             "proto_filter_score": proto_filter_score,
+            "cosine_sim": cosine_sim,  # raw cosine [-1, 1] for ProtoTTA
             "importance": importance,
             "modeloutput_z": modeloutput_z,
         }

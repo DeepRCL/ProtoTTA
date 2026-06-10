@@ -33,20 +33,18 @@ import run_inference_cars_c as ric
 
 
 DEFAULT_METHODS = [
-    "unadapted",
+    "normal",
     "tent",
     "eata",
     "sar",
-    "prototta",
-    "prototta_plus_70_30",
-    "prototta_plus_80_20",
-    "prototta_plus_90_10",
+    "proto_tta",
+    "proto_tta_plus",
 ]
 
 
 METHOD_CONFIGS = {
-    "unadapted": {
-        "display_name": "Unadapted",
+    "normal": {
+        "display_name": "Normal",
         "kind": "normal",
     },
     "tent": {
@@ -61,31 +59,81 @@ METHOD_CONFIGS = {
         "display_name": "SAR",
         "kind": "sar",
     },
-    "prototta": {
+    "proto_tta": {
         "display_name": "ProtoTTA",
         "kind": "proto_tta",
-        "proto_weight": 1.0,
-        "logit_weight": 0.0,
     },
-    "prototta_plus_70_30": {
-        "display_name": "ProtoTTA+ (70/30)",
+    "proto_tta_plus": {
+        "display_name": "ProtoTTA+",
         "kind": "proto_tta_plus",
-        "proto_weight": 0.7,
-        "logit_weight": 0.3,
-    },
-    "prototta_plus_80_20": {
-        "display_name": "ProtoTTA+ (80/20)",
-        "kind": "proto_tta_plus",
-        "proto_weight": 0.8,
-        "logit_weight": 0.2,
-    },
-    "prototta_plus_90_10": {
-        "display_name": "ProtoTTA+ (90/10)",
-        "kind": "proto_tta_plus",
-        "proto_weight": 0.9,
-        "logit_weight": 0.1,
     },
 }
+
+
+def resolve_method_config(args, method_name: str) -> Dict:
+    method_cfg = dict(METHOD_CONFIGS[method_name])
+    if method_name == "proto_tta":
+        method_cfg["proto_weight"] = 1.0
+        method_cfg["logit_weight"] = 0.0
+    elif method_name == "proto_tta_plus":
+        method_cfg["proto_weight"] = args.proto_weight
+        method_cfg["logit_weight"] = args.logit_weight
+    return method_cfg
+
+
+def eval_config_snapshot(args, method_name: str) -> Dict:
+    method_cfg = resolve_method_config(args, method_name)
+    return {
+        "ckpt": str(Path(args.ckpt).resolve()),
+        "method": method_name,
+        "method_config": method_cfg,
+        "batch_size": args.batch_size,
+        "num_workers": args.num_workers,
+        "lr": args.lr,
+        "proto_lr": args.proto_lr,
+        "proto_weight": args.proto_weight,
+        "logit_weight": args.logit_weight,
+        "proto_threshold": args.proto_threshold,
+        "proto_conf_threshold": args.proto_conf_threshold,
+        "proto_agreement_threshold": args.proto_agreement_threshold,
+        "proto_reliability_mode": args.proto_reliability_mode,
+        "proto_active_threshold": args.proto_active_threshold,
+        "proto_active_min": args.proto_active_min,
+        "proto_active_max": args.proto_active_max,
+        "proto_hs_alpha": args.proto_hs_alpha,
+        "proto_hs_gamma": args.proto_hs_gamma,
+        "proto_usage_weight": args.proto_usage_weight,
+        "proto_objective": args.proto_objective,
+        "proto_target_source": args.proto_target_source,
+        "proto_consistency_weight": args.proto_consistency_weight,
+        "proto_conflict_aware": args.proto_conflict_aware,
+        "proto_warmup_batches": args.proto_warmup_batches,
+        "proto_spatial_sharpness_weight": args.proto_spatial_sharpness_weight,
+        "proto_spatial_temperature": args.proto_spatial_temperature,
+        "proto_target_topk": args.proto_target_topk,
+        "proto_target_mass": args.proto_target_mass,
+        "proto_target_rel_threshold": args.proto_target_rel_threshold,
+        "proto_adaptive_blend": args.proto_adaptive_blend,
+        "proto_reset_mode": args.proto_reset_mode,
+        "proto_reset_frequency": args.proto_reset_frequency,
+        "baseline_adapt_mode": args.baseline_adapt_mode,
+        "proto_adapt_mode": args.proto_adapt_mode,
+        "steps": args.steps,
+        "use_clean_fisher": args.use_clean_fisher,
+        "clean_fisher_samples": args.clean_fisher_samples,
+        "severity": list(args.severity),
+        "corruptions": list(args.corruptions) if args.corruptions is not None else None,
+        "format_version": 2,
+    }
+
+
+def result_matches_config(existing_entry: Dict, expected_config: Dict) -> bool:
+    if not isinstance(existing_entry, dict):
+        return False
+    stored = existing_entry.get("eval_config")
+    if stored is None:
+        return False
+    return stored == expected_config
 
 
 def to_python(value):
@@ -317,46 +365,90 @@ def discover_corruptions_and_severities(
     return combos
 
 
-def build_method(method_name: str, ckpt: str, device: torch.device, loader, args, fishers_cache: Dict[str, Dict]):
+def build_method(
+    method_name: str,
+    ckpt: str,
+    device: torch.device,
+    loader,
+    args,
+    fishers_cache: Dict[str, Dict],
+    corruption: Optional[str] = None,
+    severity: Optional[int] = None,
+):
     model = ric.load_model(ckpt, device)
-    config = METHOD_CONFIGS[method_name]
+    config = resolve_method_config(args, method_name)
     kind = config["kind"]
 
     if kind == "normal":
         return model
     if kind == "tent":
-        return ric.setup_tent(model, lr=args.lr, steps=args.steps, adapt_mode=args.adapt_mode)
+        return ric.setup_tent(model, lr=args.lr, steps=args.steps, adapt_mode=args.baseline_adapt_mode)
     if kind == "sar":
-        return ric.setup_sar(model, lr=args.lr, steps=args.steps, adapt_mode=args.adapt_mode)
+        return ric.setup_sar(model, lr=args.lr, steps=args.steps, adapt_mode=args.baseline_adapt_mode)
     if kind == "eata":
-        fisher_key = f"{args.adapt_mode}:{args.use_clean_fisher}:{args.clean_fisher_samples}"
+        fisher_key = f"{args.baseline_adapt_mode}:{args.use_clean_fisher}:{args.clean_fisher_samples}"
         fishers = fishers_cache.get(fisher_key)
         if fishers is None:
             fisher_loader = loader
             if args.use_clean_fisher:
                 clean_loader = get_clean_loader(args.clean_dir, batch_size=min(args.batch_size, 32), num_workers=args.num_workers)
                 fisher_loader = clean_loader
-            ric.configure_model(model, args.adapt_mode)
+            elif corruption is not None and severity is not None:
+                fisher_loader = ric.get_loader(
+                    corruption,
+                    severity,
+                    args.cars_c_dir,
+                    batch_size=32,
+                    num_workers=args.num_workers,
+                )
+            ric.configure_model(model, args.baseline_adapt_mode)
             fishers = ric.compute_fishers(
                 model,
                 fisher_loader,
                 device,
-                adapt_mode=args.adapt_mode,
+                adapt_mode=args.baseline_adapt_mode,
                 num_samples=args.clean_fisher_samples,
             )
             fishers_cache[fisher_key] = fishers
-        return ric.setup_eata(model, lr=args.lr, steps=args.steps, adapt_mode=args.adapt_mode, fishers=fishers)
+        return ric.setup_eata(
+            model,
+            lr=args.lr,
+            steps=args.steps,
+            adapt_mode=args.baseline_adapt_mode,
+            fishers=fishers,
+        )
     if kind in {"proto_tta", "proto_tta_plus"}:
         return ric.setup_proto_tta(
             model,
             lr=args.proto_lr,
             steps=args.steps,
-            use_importance=True,
             use_confidence=True,
             geo_filter_threshold=args.proto_threshold,
+            conf_filter_threshold=args.proto_conf_threshold,
+            agreement_filter_threshold=args.proto_agreement_threshold,
+            reliability_mode=args.proto_reliability_mode,
+            active_proto_threshold=args.proto_active_threshold,
+            active_proto_min=args.proto_active_min,
+            active_proto_max=args.proto_active_max,
             proto_weight=config.get("proto_weight", 1.0),
             logit_weight=config.get("logit_weight", 0.0),
-            adapt_mode=args.adapt_mode,
+            hs_alpha=args.proto_hs_alpha,
+            hs_gamma=args.proto_hs_gamma,
+            usage_weight=args.proto_usage_weight,
+            proto_objective=args.proto_objective,
+            target_source=args.proto_target_source,
+            consistency_weight=args.proto_consistency_weight,
+            conflict_aware=args.proto_conflict_aware,
+            warmup_batches=args.proto_warmup_batches,
+            spatial_sharpness_weight=args.proto_spatial_sharpness_weight,
+            spatial_temperature=args.proto_spatial_temperature,
+            target_topk=args.proto_target_topk,
+            target_mass=args.proto_target_mass,
+            target_rel_threshold=args.proto_target_rel_threshold,
+            adaptive_blend=args.proto_adaptive_blend,
+            reset_mode=args.proto_reset_mode,
+            reset_frequency=args.proto_reset_frequency,
+            adapt_mode=args.proto_adapt_mode,
         )
     raise ValueError(f"Unsupported method: {method_name}")
 
@@ -409,7 +501,7 @@ def evaluate_method(method_name: str, eval_model, loader, metrics_evaluator: Car
                 "PAC / prediction stability would be invalid."
             )
 
-    adapt_steps = getattr(eval_model, "steps", 0 if method_name == "unadapted" else 1)
+    adapt_steps = getattr(eval_model, "steps", 0 if method_name == "normal" else 1)
     tracker.record_adaptation_step(len(loader) * adapt_steps)
 
     accuracy = predictions.eq(labels).float().mean().item()
@@ -453,7 +545,7 @@ def aggregate_results(results: Dict, methods: List[str]) -> Dict[str, Dict]:
 
         rel_speeds = []
         method_map = method_results.get(method, {})
-        normal_map = method_results.get("unadapted", {})
+        normal_map = method_results.get("normal", {})
         for corruption, sev_map in method_map.items():
             for severity, result in sev_map.items():
                 if result is None:
@@ -513,25 +605,89 @@ def main():
     parser.add_argument("--batch_size", type=int, default=50)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--proto_lr", type=float, default=1e-4)
+    parser.add_argument(
+        "--proto_lr",
+        type=float,
+        default=None,
+        help="LR for ProtoTTA methods. Defaults to --lr so all methods use the same LR unless overridden.",
+    )
     parser.add_argument("--proto_threshold", type=float, default=0.9)
-    parser.add_argument("--adapt_mode", default="vit", choices=[
-        "vit",
-        "layernorm",
-        "layernorm_conv",
-        "layernorm_proto",
-        "layernorm_conv_proto",
-        "layernorm_conv_proto_project",
-        "vit_layernorm_conv_proto_project",
-        "full_head",
-    ])
+    parser.add_argument("--proto_weight", type=float, default=0.7)
+    parser.add_argument("--logit_weight", type=float, default=0.3)
+    parser.add_argument("--proto_conf_threshold", type=float, default=0.1)
+    parser.add_argument("--proto_agreement_threshold", type=float, default=0.0)
+    parser.add_argument(
+        "--proto_reliability_mode",
+        type=str,
+        default="support",
+        choices=["support", "sparsity"],
+    )
+    parser.add_argument("--proto_active_threshold", type=float, default=0.1)
+    parser.add_argument("--proto_active_min", type=int, default=1)
+    parser.add_argument("--proto_active_max", type=int, default=8)
+    parser.add_argument("--proto_hs_alpha", type=float, default=0.01)
+    parser.add_argument("--proto_hs_gamma", type=float, default=0.01)
+    parser.add_argument("--proto_usage_weight", type=float, default=1.0)
+    parser.add_argument(
+        "--proto_objective",
+        type=str,
+        default="binary_entropy",
+        choices=["binary_entropy", "importance_entropy", "importance_hoyer", "patch_entropy", "train_reg"],
+    )
+    parser.add_argument(
+        "--proto_target_source",
+        type=str,
+        default="class_importance",
+        choices=["class_importance", "shared_support", "hybrid"],
+    )
+    parser.add_argument("--proto_consistency_weight", type=float, default=0.0)
+    parser.add_argument("--proto_conflict_aware", action="store_true")
+    parser.add_argument("--proto_warmup_batches", type=int, default=0)
+    parser.add_argument("--proto_spatial_sharpness_weight", type=float, default=0.0)
+    parser.add_argument("--proto_spatial_temperature", type=float, default=1.0)
+    parser.add_argument("--proto_target_topk", type=int, default=0)
+    parser.add_argument("--proto_target_mass", type=float, default=0.0)
+    parser.add_argument("--proto_target_rel_threshold", type=float, default=0.1)
+    parser.add_argument("--proto_adaptive_blend", action="store_true")
+    parser.add_argument("--proto_reset_mode", choices=["none", "episodic", "periodic"], default="none")
+    parser.add_argument("--proto_reset_frequency", type=int, default=10)
+    parser.add_argument(
+        "--baseline_adapt_mode",
+        default="vit_ln_only",
+        choices=[
+            "vit",
+            "vit_ln_only",
+            "layernorm",
+            "layernorm_conv",
+            "layernorm_proto",
+            "layernorm_conv_proto",
+            "layernorm_conv_proto_project",
+            "vit_layernorm_conv_proto_project",
+        ],
+    )
+    parser.add_argument(
+        "--proto_adapt_mode",
+        default="vit_ln_only",
+        choices=[
+            "vit",
+            "vit_conv",
+            "vit_ln_only",
+            "vit_ln_only_conv_proto",
+            "layernorm",
+            "layernorm_conv",
+            "layernorm_proto",
+            "layernorm_conv_proto",
+            "layernorm_conv_proto_project",
+            "vit_layernorm_conv_proto_project",
+        ],
+    )
     parser.add_argument("--steps", type=int, default=1)
     parser.add_argument("--clean_fisher_samples", type=int, default=500)
     parser.add_argument("--use_clean_fisher", action="store_true", default=False)
     args = parser.parse_args()
 
-    if args.adapt_mode == "full_head":
-        args.adapt_mode = "vit_layernorm_conv_proto_project_head"
+    if args.proto_lr is None:
+        args.proto_lr = args.lr
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     output_path = Path(args.output)
@@ -549,9 +705,36 @@ def main():
     results["metadata"].update({
         "batch_size": args.batch_size,
         "num_workers": args.num_workers,
-        "adapt_mode": args.adapt_mode,
+        "lr": args.lr,
+        "proto_lr": args.proto_lr,
+        "proto_weight": args.proto_weight,
+        "logit_weight": args.logit_weight,
+        "baseline_adapt_mode": args.baseline_adapt_mode,
+        "proto_adapt_mode": args.proto_adapt_mode,
         "steps": args.steps,
         "proto_threshold": args.proto_threshold,
+        "proto_conf_threshold": args.proto_conf_threshold,
+        "proto_agreement_threshold": args.proto_agreement_threshold,
+        "proto_reliability_mode": args.proto_reliability_mode,
+        "proto_active_threshold": args.proto_active_threshold,
+        "proto_active_min": args.proto_active_min,
+        "proto_active_max": args.proto_active_max,
+        "proto_hs_alpha": args.proto_hs_alpha,
+        "proto_hs_gamma": args.proto_hs_gamma,
+        "proto_usage_weight": args.proto_usage_weight,
+        "proto_objective": args.proto_objective,
+        "proto_target_source": args.proto_target_source,
+        "proto_consistency_weight": args.proto_consistency_weight,
+        "proto_conflict_aware": args.proto_conflict_aware,
+        "proto_warmup_batches": args.proto_warmup_batches,
+        "proto_spatial_sharpness_weight": args.proto_spatial_sharpness_weight,
+        "proto_spatial_temperature": args.proto_spatial_temperature,
+        "proto_target_topk": args.proto_target_topk,
+        "proto_target_mass": args.proto_target_mass,
+        "proto_target_rel_threshold": args.proto_target_rel_threshold,
+        "proto_adaptive_blend": args.proto_adaptive_blend,
+        "proto_reset_mode": args.proto_reset_mode,
+        "proto_reset_frequency": args.proto_reset_frequency,
         "methods": args.methods,
         "use_clean_fisher": args.use_clean_fisher,
         "severity": args.severity,
@@ -586,7 +769,25 @@ def main():
     print(f"Combinations   : {len(combos)}")
     print(f"Severities     : {args.severity}")
     print(f"Corruptions    : {args.corruptions if args.corruptions is not None else 'all'}")
-    print(f"Adapt mode     : {args.adapt_mode}")
+    print(f"LR / Proto LR  : {args.lr} / {args.proto_lr}")
+    print(f"Proto weights  : {args.proto_weight} / {args.logit_weight}")
+    print(f"Proto threshold: {args.proto_threshold}")
+    print(f"Proto conf thr : {args.proto_conf_threshold}")
+    print(f"Proto rel mode : {args.proto_reliability_mode}")
+    print(f"Proto active thr: {args.proto_active_threshold}")
+    print(f"Proto active rng: {args.proto_active_min}..{args.proto_active_max}")
+    print(f"Proto hs       : {args.proto_hs_alpha}/{args.proto_hs_gamma}")
+    print(f"Proto usage w  : {args.proto_usage_weight}")
+    print(f"Proto objective: {args.proto_objective}")
+    print(f"Proto target src: {args.proto_target_source}")
+    print(f"Proto cons wt  : {args.proto_consistency_weight}")
+    print(f"Proto conflict : {args.proto_conflict_aware}")
+    print(f"Proto warmup b : {args.proto_warmup_batches}")
+    print(f"Proto spatial w: {args.proto_spatial_sharpness_weight}")
+    print(f"Proto spatial t: {args.proto_spatial_temperature}")
+    print(f"Proto rel thr  : {args.proto_target_rel_threshold}")
+    print(f"Baseline adapt : {args.baseline_adapt_mode}")
+    print(f"Proto adapt    : {args.proto_adapt_mode}")
     print(f"Device         : {device}")
     print("=" * 90)
 
@@ -602,9 +803,22 @@ def main():
             method_bucket = results["results"].setdefault(method, {})
             corr_bucket = method_bucket.setdefault(corruption, {})
             needs_override = method in set(args.override_methods)
-            if severity_key in corr_bucket and corr_bucket[severity_key] is not None and not needs_override:
+            expected_config = eval_config_snapshot(args, method)
+            existing_entry = corr_bucket.get(severity_key)
+            if (
+                severity_key in corr_bucket
+                and existing_entry is not None
+                and not needs_override
+                and result_matches_config(existing_entry, expected_config)
+            ):
                 done += 1
                 continue
+
+            if existing_entry is not None and not needs_override:
+                print(
+                    f"\nConfig changed for {method} | {corruption} | severity {severity}; "
+                    "recomputing cached result."
+                )
 
             loader = ric.get_loader(corruption, severity, args.cars_c_dir, args.batch_size, args.num_workers)
             clean_classes = getattr(clean_loader.dataset, "classes", None)
@@ -613,11 +827,21 @@ def main():
                 raise RuntimeError(f"Class order mismatch between clean set and {corruption}/sev{severity}")
 
             print(f"\n[{done + 1}/{total_jobs}] {method} | {corruption} | severity {severity}")
-            eval_model = build_method(method, args.ckpt, device, loader, args, fishers_cache)
+            eval_model = build_method(
+                method,
+                args.ckpt,
+                device,
+                loader,
+                args,
+                fishers_cache,
+                corruption=corruption,
+                severity=severity,
+            )
             result = evaluate_method(method, eval_model, loader, evaluator, device)
             result["method"] = method
             result["corruption"] = corruption
             result["severity"] = severity
+            result["eval_config"] = expected_config
             corr_bucket[severity_key] = result
 
             results["aggregates"] = aggregate_results(results, args.methods)
