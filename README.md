@@ -18,18 +18,18 @@ This repository supports two main use cases.
 
 ### Add ProtoTTA or ProtoTTA+ to a new model
 
-Start with the developer kit in [`ProToTTA/README.md`](./ProToTTA/README.md).
+Start with the developer kit in [`ProtoTTA/README.md`](./ProtoTTA/README.md).
 
-- Model integration guide: [`ProToTTA/ADDING_NEW_MODEL.md`](./ProToTTA/ADDING_NEW_MODEL.md)
-- Generic implementation skeleton: [`ProToTTA/templates/prototta_adapter.py`](./ProToTTA/templates/prototta_adapter.py)
-- Interpretability metrics guide: [`ProToTTA/INTERPRETABILITY_METRICS.md`](./ProToTTA/INTERPRETABILITY_METRICS.md)
-- VLM explainability guide: [`ProToTTA/VLM_EXPLAINABILITY.md`](./ProToTTA/VLM_EXPLAINABILITY.md)
+- Model integration guide: [`ProtoTTA/ADDING_NEW_MODEL.md`](./ProtoTTA/ADDING_NEW_MODEL.md)
+- Generic implementation skeleton: [`ProtoTTA/templates/prototta_adapter.py`](./ProtoTTA/templates/prototta_adapter.py)
+- Interpretability metrics guide: [`ProtoTTA/INTERPRETABILITY_METRICS.md`](./ProtoTTA/INTERPRETABILITY_METRICS.md)
+- VLM explainability guide: [`ProtoTTA/VLM_EXPLAINABILITY.md`](./ProtoTTA/VLM_EXPLAINABILITY.md)
 
 
 
 ### Run the existing paper implementations
 
-Use the backbone-specific command guide in [`ProToTTA/EXISTING_BACKBONES.md`](./ProToTTA/EXISTING_BACKBONES.md).
+Use the backbone-specific command guide in [`ProtoTTA/EXISTING_BACKBONES.md`](./ProtoTTA/EXISTING_BACKBONES.md).
 
 ## Abstract
 
@@ -39,7 +39,7 @@ Deep networks that rely on prototypes, interpretable representations that can be
 
 This public release focuses on the ProtoTTA code paths that are needed to reproduce and extend the paper:
 
-- [`ProToTTA/`](./ProToTTA): developer-facing guide for adding ProtoTTA / ProtoTTA+ to a new model, implementing metrics, and extending VLM explainability.
+- [`ProtoTTA/`](./ProtoTTA): developer-facing guide for adding ProtoTTA / ProtoTTA+ to a new model, implementing metrics, and extending VLM explainability.
 - [`ProtoViT/`](./ProtoViT): ProtoViT-based image classification experiments on CUB-200-C, including the main `run_inference.py` and `evaluate_robustness.py` workflows, the prototype metrics, and the VLM evaluation code.
 - [`ProtoLens/`](./ProtoLens): ProtoLens-based NLP robustness experiments on Amazon-C.
 - [`ProtoPFormer/`](./ProtoPFormer): ProtoPFormer-based image robustness experiments on Stanford Dogs-C.
@@ -58,18 +58,18 @@ This public release focuses on the ProtoTTA code paths that are needed to reprod
 
 ## Main Entry Points
 
-- [`ProToTTA/README.md`](./ProToTTA/README.md): primary developer documentation for future users extending ProtoTTA.
-- [`ProToTTA/ADDING_NEW_MODEL.md`](./ProToTTA/ADDING_NEW_MODEL.md): how to add ProtoTTA / ProtoTTA+ to a new architecture.
-- [`ProToTTA/INTERPRETABILITY_METRICS.md`](./ProToTTA/INTERPRETABILITY_METRICS.md): how to implement PAC, PCA, PCA-W, sparsity, calibration, and related metrics.
-- [`ProToTTA/VLM_EXPLAINABILITY.md`](./ProToTTA/VLM_EXPLAINABILITY.md): how to adapt the VLM-based explainability pipeline for a new model.
-- [`ProToTTA/EXISTING_BACKBONES.md`](./ProToTTA/EXISTING_BACKBONES.md): commands and pointers for ProtoViT, ProtoLens, ProtoPFormer, ProtoS-ViT, and ProtoPNet-style code paths already in this repo.
+- [`ProtoTTA/README.md`](./ProtoTTA/README.md): primary developer documentation for future users extending ProtoTTA.
+- [`ProtoTTA/ADDING_NEW_MODEL.md`](./ProtoTTA/ADDING_NEW_MODEL.md): how to add ProtoTTA / ProtoTTA+ to a new architecture.
+- [`ProtoTTA/INTERPRETABILITY_METRICS.md`](./ProtoTTA/INTERPRETABILITY_METRICS.md): how to implement PAC, PCA, PCA-W, sparsity, calibration, and related metrics.
+- [`ProtoTTA/VLM_EXPLAINABILITY.md`](./ProtoTTA/VLM_EXPLAINABILITY.md): how to adapt the VLM-based explainability pipeline for a new model.
+- [`ProtoTTA/EXISTING_BACKBONES.md`](./ProtoTTA/EXISTING_BACKBONES.md): commands and pointers for ProtoViT, ProtoLens, ProtoPFormer, ProtoS-ViT, and ProtoPNet-style code paths already in this repo.
 
 ## Repository Layout
 
 ```text
 .
 ├── README.md
-├── ProToTTA/
+├── ProtoTTA/
 │   ├── README.md
 │   ├── ADDING_NEW_MODEL.md
 │   ├── INTERPRETABILITY_METRICS.md
@@ -144,17 +144,17 @@ Key implementation files:
 - [`protosvit/evaluate_robustness_cars_c.py`](./protosvit/evaluate_robustness_cars_c.py): pre-defined `ProtoTTA+` method configurations.
 - [`protopnet/proto_entropy_enchanced.py`](./protopnet/proto_entropy_enchanced.py): enhanced ProtoPNet-oriented variant with hybrid loss and extra stability controls.
 
-For a generic implementation guide for new models, start with [`ProToTTA/README.md`](./ProToTTA/README.md), then use [`ProToTTA/ADDING_NEW_MODEL.md`](./ProToTTA/ADDING_NEW_MODEL.md).
+For a generic implementation guide for new models, start with [`ProtoTTA/README.md`](./ProtoTTA/README.md), then use [`ProtoTTA/ADDING_NEW_MODEL.md`](./ProtoTTA/ADDING_NEW_MODEL.md).
 
 ## Developer Documentation
 
-The top-level README is intentionally high-level. The detailed developer-facing documentation lives in the `ProToTTA` folder:
+The top-level README is intentionally high-level. The detailed developer-facing documentation lives in the `ProtoTTA` folder:
 
-- [`ProToTTA/README.md`](./ProToTTA/README.md): overview of the developer kit.
-- [`ProToTTA/ADDING_NEW_MODEL.md`](./ProToTTA/ADDING_NEW_MODEL.md): integration workflow for a new model.
-- [`ProToTTA/INTERPRETABILITY_METRICS.md`](./ProToTTA/INTERPRETABILITY_METRICS.md): PAC, PCA, PCA-W, sparsity, calibration, and adaptation-process metrics.
-- [`ProToTTA/VLM_EXPLAINABILITY.md`](./ProToTTA/VLM_EXPLAINABILITY.md): explainable TTA with VLM evidence and scoring.
-- [`ProToTTA/EXISTING_BACKBONES.md`](./ProToTTA/EXISTING_BACKBONES.md): current backbone-specific run commands and file pointers.
+- [`ProtoTTA/README.md`](./ProtoTTA/README.md): overview of the developer kit.
+- [`ProtoTTA/ADDING_NEW_MODEL.md`](./ProtoTTA/ADDING_NEW_MODEL.md): integration workflow for a new model.
+- [`ProtoTTA/INTERPRETABILITY_METRICS.md`](./ProtoTTA/INTERPRETABILITY_METRICS.md): PAC, PCA, PCA-W, sparsity, calibration, and adaptation-process metrics.
+- [`ProtoTTA/VLM_EXPLAINABILITY.md`](./ProtoTTA/VLM_EXPLAINABILITY.md): explainable TTA with VLM evidence and scoring.
+- [`ProtoTTA/EXISTING_BACKBONES.md`](./ProtoTTA/EXISTING_BACKBONES.md): current backbone-specific run commands and file pointers.
 
 ## Metrics and Explainability
 
@@ -168,7 +168,7 @@ The repository includes dedicated code for evaluating not just accuracy, but als
 - [`ProtoPFormer/enhanced_prototype_metrics.py`](./ProtoPFormer/enhanced_prototype_metrics.py): extended interpretability metrics for ProtoPFormer.
 - [`protosvit/evaluate_robustness_cars_c.py`](./protosvit/evaluate_robustness_cars_c.py): table-ready metrics for ProtoS-ViT, including PAC, weighted alignment, prediction stability, and selection rate.
 
-For the generic metric design and implementation guidance, see [`ProToTTA/INTERPRETABILITY_METRICS.md`](./ProToTTA/INTERPRETABILITY_METRICS.md).
+For the generic metric design and implementation guidance, see [`ProtoTTA/INTERPRETABILITY_METRICS.md`](./ProtoTTA/INTERPRETABILITY_METRICS.md).
 
 ## VLM Evaluation
 
@@ -180,7 +180,7 @@ The VLM analysis pipeline is an important part of this release and is kept in th
 
 This part of the repository is designed to study whether ProtoTTA restores human-aligned semantic focus under distribution shift, and how the proposed prototype metrics correlate with VLM-rated reasoning quality.
 
-For the generic developer guide for explainable TTA, see [`ProToTTA/VLM_EXPLAINABILITY.md`](./ProToTTA/VLM_EXPLAINABILITY.md).
+For the generic developer guide for explainable TTA, see [`ProtoTTA/VLM_EXPLAINABILITY.md`](./ProtoTTA/VLM_EXPLAINABILITY.md).
 
 ## Notes Before Pushing
 

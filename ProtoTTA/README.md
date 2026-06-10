@@ -1,4 +1,4 @@
-# ProToTTA Developer Kit
+# ProtoTTA Developer Kit
 
 This folder is a **developer-oriented guide** for adding **ProtoTTA** or **ProtoTTA+** to a new prototype-based model.
 
