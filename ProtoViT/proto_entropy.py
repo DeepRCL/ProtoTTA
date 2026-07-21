@@ -5,16 +5,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class ProtoEntropy(nn.Module):
-    def __init__(self, model, optimizer, steps=1, episodic=False, 
+    def __init__(self, model, optimizer, steps=1, episodic=False,
                  alpha_target=1.0, alpha_separation=0.0, alpha_coherence=0.0,
                  use_prototype_importance=False, use_confidence_weighting=False,
-                 reset_mode=None, reset_frequency=10, 
+                 reset_mode=None, reset_frequency=10,
                  confidence_threshold=0.7, ema_alpha=0.999,
                  use_geometric_filter=False, geo_filter_threshold=0.3,
                  consensus_strategy='max', consensus_ratio=0.5,
                  use_ensemble_entropy=False,
                  source_proto_stats=None, alpha_source_kl=0.0,
-                 adapt_all_prototypes=False):
+                 adapt_all_prototypes=False,
+                 logit_weight=0.0,
+                 shared_confidence_weighting=False,
+                 gradient_normalize=False,
+                 adaptive_lambda=False,
+                 adaptive_lambda_strategy='relative_reliability',
+                 adaptive_delta0=0.25,
+                 adaptive_topk=3,
+                 lambda_ema_momentum=0.9,
+                 lambda_min=0.05,
+                 lambda_max=0.95,
+                 record_diagnostics=False):
         """
         Args:
             episodic: If True, uses 'episodic' reset_mode (backward compatibility)
@@ -72,6 +83,20 @@ class ProtoEntropy(nn.Module):
         
         # Adaptation scope parameter
         self.adapt_all_prototypes = adapt_all_prototypes
+
+        # Unified λ: fraction of logit-entropy in the total loss (0 = pure proto, 1 = pure logit)
+        self.logit_weight = logit_weight
+        self.shared_confidence_weighting = shared_confidence_weighting
+        self.gradient_normalize = gradient_normalize
+        self.adaptive_lambda = adaptive_lambda
+        self.adaptive_lambda_strategy = adaptive_lambda_strategy
+        self.adaptive_delta0 = adaptive_delta0
+        self.adaptive_topk = adaptive_topk
+        self.lambda_ema_momentum = lambda_ema_momentum
+        self.lambda_min = lambda_min
+        self.lambda_max = lambda_max
+        self.record_diagnostics = record_diagnostics
+        self.lambda_ema = None
         
         # New reset mechanism parameters
         # If reset_mode not specified, infer from episodic flag for backward compatibility
@@ -106,6 +131,14 @@ class ProtoEntropy(nn.Module):
             'total_samples': 0,
             'adapted_samples': 0,  # Samples that passed filtering
             'total_updates': 0,    # Total optimizer steps
+            'proto_loss': [],
+            'output_loss': [],
+            'proto_grad_norm': [],
+            'output_grad_norm': [],
+            'adaptive_lambda': [],
+            'adaptive_lambda_raw': [],
+            'proto_signal_reliability': [],
+            'output_signal_reliability': [],
         }
 
     def forward(self, x):
@@ -488,11 +521,99 @@ class ProtoEntropy(nn.Module):
             print (f"Loss: {loss}")
             loss = loss + self.alpha_source_kl * loss_source_kl
 
+        proto_loss = loss
+        logit_ent = -(logits.softmax(1) * logits.log_softmax(1)).sum(1)
+        logit_sample_weight = reliable_mask
+        if self.shared_confidence_weighting and self.use_confidence_weighting:
+            logit_sample_weight = logit_sample_weight * confidence
+        loss_logit = (logit_ent * logit_sample_weight).sum() / (reliable_mask.sum() + 1e-8)
+
+        class_target_mask = (proto_identities.unsqueeze(0) == pred_class.unsqueeze(1)).float()
+        positive_scores = ((sim_scores.clamp(-1.0, 1.0) + 1.0) / 2.0).clamp_min(1e-8)
+        target_scores = positive_scores * class_target_mask
+        q = target_scores / target_scores.sum(dim=1, keepdim=True).clamp_min(1e-8)
+        proto_entropy = -(q * torch.log(q.clamp_min(1e-8))).sum(dim=1)
+        num_target = class_target_mask.sum(dim=1).clamp_min(2.0)
+        concentration = 1.0 - proto_entropy / torch.log(num_target)
+        strength = target_scores.max(dim=1).values / positive_scores.max(dim=1).values.clamp_min(1e-8)
+        proto_reliability = (concentration * strength).clamp(0.0, 1.0)
+
+        output_probs = logits.softmax(dim=1)
+        output_reliability = 1.0 - (
+            -(output_probs * torch.log(output_probs.clamp_min(1e-8))).sum(dim=1)
+            / torch.log(logits.new_tensor(float(output_probs.shape[1])))
+        )
+
+        proto_weight = 1.0 - self.logit_weight
+        logit_weight = self.logit_weight
+        if self.adaptive_lambda:
+            valid = reliable_mask.bool()
+            if self.adaptive_lambda_strategy == 'activation_margin':
+                masked_target = positive_scores.masked_fill(~class_target_mask.bool(), float('-inf'))
+                k_target = min(
+                    self.adaptive_topk,
+                    int(class_target_mask.sum(dim=1).min().item()),
+                )
+                top_target = masked_target.topk(max(k_target, 1), dim=1).values
+                delta = (top_target - 0.5).abs().mean(dim=1)
+                adaptive_score = (delta / max(self.adaptive_delta0, 1e-8)).clamp(0.0, 1.0)
+            elif self.adaptive_lambda_strategy == 'relative_reliability':
+                adaptive_score = proto_reliability / (
+                    proto_reliability + output_reliability + 1e-8
+                )
+            else:
+                raise ValueError(f"Unknown adaptive lambda strategy: {self.adaptive_lambda_strategy}")
+            current_lambda = adaptive_score[valid].mean().detach().item()
+            if self.lambda_ema is None:
+                self.lambda_ema = current_lambda
+            else:
+                self.lambda_ema = (self.lambda_ema_momentum * self.lambda_ema +
+                                   (1.0 - self.lambda_ema_momentum) * current_lambda)
+            proto_weight = min(self.lambda_max, max(self.lambda_min, self.lambda_ema))
+            logit_weight = 1.0 - proto_weight
+
+        need_grad_norms = self.gradient_normalize or self.record_diagnostics
+        proto_grad_norm = self._gradient_norm(proto_loss) if need_grad_norms else None
+        output_grad_norm = self._gradient_norm(loss_logit) if need_grad_norms else None
+        proto_term = proto_loss
+        output_term = loss_logit
+        if self.gradient_normalize:
+            proto_term = proto_loss / (proto_grad_norm.detach() + 1e-8)
+            output_term = loss_logit / (output_grad_norm.detach() + 1e-8)
+
+        loss = proto_weight * proto_term + logit_weight * output_term
+
+        if self.record_diagnostics or self.adaptive_lambda:
+            valid = reliable_mask.bool()
+            self.adaptation_stats['proto_loss'].append(float(proto_loss.detach().item()))
+            self.adaptation_stats['output_loss'].append(float(loss_logit.detach().item()))
+            if proto_grad_norm is not None:
+                self.adaptation_stats['proto_grad_norm'].append(float(proto_grad_norm.item()))
+                self.adaptation_stats['output_grad_norm'].append(float(output_grad_norm.item()))
+            self.adaptation_stats['adaptive_lambda'].append(float(proto_weight))
+            if self.adaptive_lambda:
+                self.adaptation_stats['adaptive_lambda_raw'].append(float(current_lambda))
+            self.adaptation_stats['proto_signal_reliability'].append(
+                float(proto_reliability[valid].mean().detach().item()))
+            self.adaptation_stats['output_signal_reliability'].append(
+                float(output_reliability[valid].mean().detach().item()))
+
         loss.backward()
         self.optimizer.step()
         self.optimizer.zero_grad()
 
         return logits, min_distances, similarities
+
+    def _gradient_norm(self, loss):
+        params = [
+            p for group in self.optimizer.param_groups for p in group['params']
+            if p.requires_grad
+        ]
+        grads = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=True)
+        squared = [g.detach().float().pow(2).sum() for g in grads if g is not None]
+        if not squared:
+            return loss.detach().new_tensor(0.0)
+        return torch.stack(squared).sum().sqrt()
 
 
 class ProtoEntropyEATA(nn.Module):
@@ -675,8 +796,9 @@ def configure_model(model, adaptation_mode='layernorm_only'):
     Args:
         adaptation_mode: What parameters to enable for adaptation (same as collect_params)
     """
-    # train mode, because ProtoEntropy optimizes the model to minimize entropy
-    model.train()
+    # Gradients work in eval mode; this disables DropPath/dropout so repeated
+    # online adaptation trajectories are deterministic.
+    model.eval()
     # disable grad, to (re-)enable only what ProtoEntropy updates
     model.requires_grad_(False)
     
@@ -684,6 +806,7 @@ def configure_model(model, adaptation_mode='layernorm_only'):
     if 'layernorm' in adaptation_mode:
         for m in model.modules():
             if isinstance(m, nn.BatchNorm2d):
+                m.train()
                 m.requires_grad_(True)
                 # force use of batch stats in train and eval modes
                 m.track_running_stats = False

@@ -118,7 +118,14 @@ def parse_args():
     # Output
     parser.add_argument('--save_results', action='store_true', default=True,
                        help='Save results to JSON')
-    
+
+    parser.add_argument('--proto_lambda', type=float, default=1.0,
+                       help='Unified ProtoTTA interpolation λ ∈ [0,1]: '
+                            '1.0 = pure prototype entropy (ProtoTTA), '
+                            '0.0 = pure logit entropy (Tent-style), '
+                            '0.7 = ProtoTTA+ default. '
+                            'Loss = λ*proto_loss + (1-λ)*logit_entropy.')
+
     return parser.parse_args()
 
 
@@ -230,21 +237,23 @@ def setup_eata(model, adaptation_mode: str, e_margin: float, d_margin: float):
 
 
 def setup_prototta(model, adaptation_mode: str, use_geo_filter: bool, geo_threshold: float,
-                   importance_mode: str = 'global'):
+                   importance_mode: str = 'global', logit_weight: float = 0.0):
     """Set up ProtoTTA adaptation."""
     model = adapt_utils.configure_model(model, adaptation_mode)
     params, param_names = adapt_utils.collect_params(model, adaptation_mode)
     print(f"ProtoTTA: Adapting {len(params)} parameter groups")
     print(f"  Geometric filter: {use_geo_filter}, Threshold: {geo_threshold}")
     print(f"  Importance mode: {importance_mode}")
-    
+    print(f"  logit_weight (1-λ): {logit_weight:.2f}")
+
     optimizer = setup_optimizer(params)
     return proto_tta.ProtoTTA(model, optimizer, steps=cfg.OPTIM.STEPS,
                               episodic=cfg.MODEL.EPISODIC,
                               use_geometric_filter=use_geo_filter,
                               geo_filter_threshold=geo_threshold,
                               consensus_strategy='max',
-                              importance_mode=importance_mode)
+                              importance_mode=importance_mode,
+                              logit_weight=logit_weight)
 
 
 # ============================================================================
@@ -469,8 +478,9 @@ def main():
             results['eata'] = evaluate_tta_method(eata_model, dataloader, device, "EATA")
         
         elif method == 'prototta':
-            prototta_model = setup_prototta(model, args.adaptation_mode, args.geo_filter, 
-                                            args.geo_threshold, args.importance_mode)
+            prototta_model = setup_prototta(model, args.adaptation_mode, args.geo_filter,
+                                            args.geo_threshold, args.importance_mode,
+                                            logit_weight=1.0 - args.proto_lambda)
             results['prototta'] = evaluate_tta_method(prototta_model, dataloader, device, "ProtoTTA")
     
     # Print results

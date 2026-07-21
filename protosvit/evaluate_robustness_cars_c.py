@@ -72,12 +72,13 @@ METHOD_CONFIGS = {
 
 def resolve_method_config(args, method_name: str) -> Dict:
     method_cfg = dict(METHOD_CONFIGS[method_name])
-    if method_name == "proto_tta":
-        method_cfg["proto_weight"] = 1.0
-        method_cfg["logit_weight"] = 0.0
-    elif method_name == "proto_tta_plus":
-        method_cfg["proto_weight"] = args.proto_weight
-        method_cfg["logit_weight"] = args.logit_weight
+    if method_name in ("proto_tta", "proto_tta_plus"):
+        # Resolve λ: --proto_lambda is the unified knob; --proto_weight overrides for back-compat
+        lam = args.proto_lambda
+        if args.proto_weight is not None:
+            lam = args.proto_weight
+        method_cfg["proto_weight"] = lam
+        method_cfg["logit_weight"] = 1.0 - lam
     return method_cfg
 
 
@@ -91,6 +92,7 @@ def eval_config_snapshot(args, method_name: str) -> Dict:
         "num_workers": args.num_workers,
         "lr": args.lr,
         "proto_lr": args.proto_lr,
+        "proto_lambda": args.proto_lambda,
         "proto_weight": args.proto_weight,
         "logit_weight": args.logit_weight,
         "proto_threshold": args.proto_threshold,
@@ -612,8 +614,13 @@ def main():
         help="LR for ProtoTTA methods. Defaults to --lr so all methods use the same LR unless overridden.",
     )
     parser.add_argument("--proto_threshold", type=float, default=0.9)
-    parser.add_argument("--proto_weight", type=float, default=0.7)
-    parser.add_argument("--logit_weight", type=float, default=0.3)
+    parser.add_argument("--proto_lambda", type=float, default=1.0,
+                        help="Unified ProtoTTA λ ∈ [0,1]: 1.0=pure prototype entropy (ProtoTTA), "
+                             "0.0=pure logit entropy, 0.7=ProtoTTA+ default. (default: 1.0)")
+    parser.add_argument("--proto_weight", type=float, default=None,
+                        help="(deprecated) Use --proto_lambda instead.")
+    parser.add_argument("--logit_weight", type=float, default=None,
+                        help="(deprecated) Use --proto_lambda instead.")
     parser.add_argument("--proto_conf_threshold", type=float, default=0.1)
     parser.add_argument("--proto_agreement_threshold", type=float, default=0.0)
     parser.add_argument(

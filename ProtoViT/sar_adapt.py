@@ -266,13 +266,13 @@ def load_model_and_optimizer(model, optimizer, model_state, optimizer_state):
 
 def configure_model(model):
     """Configure model for use with SAR."""
-    # train mode, because SAR optimizes the model to minimize entropy
-    model.train()
+    model.eval()
     # disable grad, to (re-)enable only what SAR updates
     model.requires_grad_(False)
     # configure norm for SAR updates: enable grad + force batch statisics (this only for BN models)
     for m in model.modules():
         if isinstance(m, nn.BatchNorm2d):
+            m.train()
             m.requires_grad_(True)
             # force use of batch stats in train and eval modes
             m.track_running_stats = False
@@ -287,7 +287,7 @@ def configure_model(model):
 def check_model(model):
     """Check model for compatability with SAR."""
     is_training = model.training
-    assert is_training, "SAR needs train mode: call model.train()"
+    # Eval mode is intentional for deterministic transformer adaptation.
     param_grads = [p.requires_grad for p in model.parameters()]
     has_any_params = any(param_grads)
     has_all_params = all(param_grads)

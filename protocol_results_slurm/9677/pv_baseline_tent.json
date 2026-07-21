@@ -1,0 +1,168 @@
+{
+  "timestamp": "2026-07-20T13:29:09.193091",
+  "metadata": {
+    "model_path": "/home/mahdi.abootorabi/protovit/ProtoViT/saved_models/deit_small_patch16_224/exp1/14finetuned0.8609.pth",
+    "data_dir": "/home/mahdi.abootorabi/protovit/ProtoViT/datasets/cub200_c",
+    "clean_data_dir": "./datasets/cub200_cropped/test_cropped/",
+    "on_the_fly": false,
+    "batch_size": 128,
+    "severity": 5,
+    "corruption_types": [
+      "gaussian_noise",
+      "fog",
+      "gaussian_blur",
+      "elastic_transform",
+      "brightness",
+      "jpeg_compression",
+      "contrast",
+      "defocus_blur",
+      "frost",
+      "impulse_noise",
+      "pixelate",
+      "shot_noise",
+      "speckle_noise"
+    ],
+    "modes": [
+      "tent"
+    ],
+    "mode_configs": {
+      "tent": {}
+    },
+    "prototype_metrics_enabled": false,
+    "proto_baseline_samples": null
+  },
+  "results": {
+    "tent": {
+      "gaussian_noise": {
+        "5": {
+          "accuracy": 0.4577148774594408,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 5794,
+            "total_updates": 5794
+          }
+        }
+      },
+      "fog": {
+        "5": {
+          "accuracy": 0.629962029685882,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 5794,
+            "total_updates": 5794
+          }
+        }
+      },
+      "gaussian_blur": {
+        "5": {
+          "accuracy": 0.392129789437349,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 5794,
+            "total_updates": 5794
+          }
+        }
+      },
+      "elastic_transform": {
+        "5": {
+          "accuracy": 0.7380048325854333,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 5794,
+            "total_updates": 5794
+          }
+        }
+      },
+      "brightness": {
+        "5": {
+          "accuracy": 0.7216085605799103,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 5794,
+            "total_updates": 5794
+          }
+        }
+      },
+      "jpeg_compression": {
+        "5": {
+          "accuracy": 0.6710390058681395,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 5794,
+            "total_updates": 5794
+          }
+        }
+      },
+      "contrast": {
+        "5": {
+          "accuracy": 0.5315843976527442,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 5794,
+            "total_updates": 5794
+          }
+        }
+      },
+      "defocus_blur": {
+        "5": {
+          "accuracy": 0.4154297549188816,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 5794,
+            "total_updates": 5794
+          }
+        }
+      },
+      "frost": {
+        "5": {
+          "accuracy": 0.4994822229892993,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 5794,
+            "total_updates": 5794
+          }
+        }
+      },
+      "impulse_noise": {
+        "5": {
+          "accuracy": 0.4045564376941664,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 5794,
+            "total_updates": 5794
+          }
+        }
+      },
+      "pixelate": {
+        "5": {
+          "accuracy": 0.7026234035208837,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 5794,
+            "total_updates": 5794
+          }
+        }
+      },
+      "shot_noise": {
+        "5": {
+          "accuracy": 0.412840869865378,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 5794,
+            "total_updates": 5794
+          }
+        }
+      },
+      "speckle_noise": {
+        "5": {
+          "accuracy": 0.4290645495340007,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 5794,
+            "total_updates": 5794
+          }
+        }
+      }
+    }
+  }
+}

@@ -1165,7 +1165,7 @@ def eval_tta(wrapper, loader, device):
 
 def run_one(ckpt_path, corruption, severity, modes, cars_c_dir,
             batch_size, num_workers, lr, proto_lr, proto_threshold,
-            proto_weight, logit_weight, proto_conf_threshold,
+            proto_lambda, proto_conf_threshold,
             proto_agreement_threshold, proto_reliability_mode, proto_active_threshold,
             proto_active_min, proto_active_max, proto_hs_alpha, proto_hs_gamma, proto_usage_weight,
             proto_objective, proto_target_source, proto_consistency_weight,
@@ -1200,7 +1200,9 @@ def run_one(ckpt_path, corruption, severity, modes, cars_c_dir,
         elif mode == "sar":
             wrapper = setup_sar(model, lr=lr, steps=steps, adapt_mode=baseline_adapt_mode)
             acc = eval_tta(wrapper, loader, device)
-        elif mode == "proto_tta":
+        elif mode in ("proto_tta", "proto_tta_plus"):
+            # Unified ProtoTTA: λ=1 → pure prototype entropy; λ=0 → pure logit entropy
+            # proto_tta_plus kept as alias for backward compatibility
             wrapper = setup_proto_tta(
                 model, lr=proto_lr, steps=steps,
                 use_confidence=True,
@@ -1211,39 +1213,8 @@ def run_one(ckpt_path, corruption, severity, modes, cars_c_dir,
                 active_proto_threshold=proto_active_threshold,
                 active_proto_min=proto_active_min,
                 active_proto_max=proto_active_max,
-                proto_weight=1.0, logit_weight=0.0,
-                hs_alpha=proto_hs_alpha,
-                hs_gamma=proto_hs_gamma,
-                usage_weight=proto_usage_weight,
-                proto_objective=proto_objective,
-                target_source=proto_target_source,
-                consistency_weight=proto_consistency_weight,
-                conflict_aware=proto_conflict_aware,
-                warmup_batches=proto_warmup_batches,
-                spatial_sharpness_weight=proto_spatial_sharpness_weight,
-                spatial_temperature=proto_spatial_temperature,
-                target_topk=proto_target_topk,
-                target_mass=proto_target_mass,
-                target_rel_threshold=proto_target_rel_threshold,
-                adaptive_blend=proto_adaptive_blend,
-                reset_mode=proto_reset_mode,
-                reset_frequency=proto_reset_frequency,
-                adapt_mode=proto_adapt_mode,
-            )
-            acc = eval_tta(wrapper, loader, device)
-        elif mode == "proto_tta_plus":
-            wrapper = setup_proto_tta(
-                model, lr=proto_lr, steps=steps,
-                use_confidence=True,
-                geo_filter_threshold=proto_threshold,
-                conf_filter_threshold=proto_conf_threshold,
-                agreement_filter_threshold=proto_agreement_threshold,
-                reliability_mode=proto_reliability_mode,
-                active_proto_threshold=proto_active_threshold,
-                active_proto_min=proto_active_min,
-                active_proto_max=proto_active_max,
-                proto_weight=proto_weight,
-                logit_weight=logit_weight,
+                proto_weight=proto_lambda,
+                logit_weight=1.0 - proto_lambda,
                 hs_alpha=proto_hs_alpha,
                 hs_gamma=proto_hs_gamma,
                 usage_weight=proto_usage_weight,
@@ -1309,10 +1280,17 @@ def main():
                    help="LR for ProtoTTA / ProtoTTA+. Defaults to --lr.")
     p.add_argument("--proto_threshold", type=float, default=0.3,
                    help="Geometric filter threshold on proto_filter_score support")
-    p.add_argument("--proto_weight", type=float, default=0.7,
-                   help="Weight of prototype loss in ProtoTTA+")
-    p.add_argument("--logit_weight", type=float, default=0.3,
-                   help="Weight of logit entropy in ProtoTTA+")
+    p.add_argument("--proto_lambda", type=float, default=1.0,
+                   help="Unified ProtoTTA interpolation λ ∈ [0,1]: "
+                        "1.0 = pure prototype entropy (ProtoTTA), "
+                        "0.0 = pure logit entropy (Tent-style), "
+                        "0.7 = ProtoTTA+ default. "
+                        "Loss = λ*proto_loss + (1-λ)*logit_entropy.")
+    # Legacy aliases kept for backward compatibility
+    p.add_argument("--proto_weight", type=float, default=None,
+                   help="(deprecated) Use --proto_lambda instead.")
+    p.add_argument("--logit_weight", type=float, default=None,
+                   help="(deprecated) Use --proto_lambda instead.")
     p.add_argument("--proto_conf_threshold", type=float, default=0.1,
                    help="Require pseudo-label confidence above this threshold for ProtoTTA adaptation")
     p.add_argument("--proto_agreement_threshold", type=float, default=0.0,
@@ -1443,6 +1421,14 @@ def main():
     print(f"  Device           : {device}")
     print("=" * 70)
 
+    # Resolve proto_lambda: legacy --proto_weight overrides if explicitly set
+    proto_lambda = args.proto_lambda
+    if args.proto_weight is not None:
+        proto_lambda = args.proto_weight
+        print(f"  [note] --proto_weight={args.proto_weight} overrides --proto_lambda → λ={proto_lambda}")
+
+    print(f"  proto_lambda     : {proto_lambda}  (proto={proto_lambda:.2f}, logit={1-proto_lambda:.2f})")
+
     all_results = {}
 
     if args.all_corruptions:
@@ -1463,7 +1449,7 @@ def main():
                     args.ckpt, corruption, sev, args.modes,
                     args.cars_c_dir, args.batch_size, args.num_workers,
                     args.lr, args.proto_lr, args.proto_threshold,
-                    args.proto_weight, args.logit_weight, args.proto_conf_threshold,
+                    proto_lambda, args.proto_conf_threshold,
                     args.proto_agreement_threshold, args.proto_reliability_mode, args.proto_active_threshold,
                     args.proto_active_min, args.proto_active_max, args.proto_hs_alpha, args.proto_hs_gamma, args.proto_usage_weight,
                     args.proto_objective, args.proto_target_source, args.proto_consistency_weight,
@@ -1481,7 +1467,7 @@ def main():
             args.ckpt, args.corruption, args.severity, args.modes,
             args.cars_c_dir, args.batch_size, args.num_workers,
             args.lr, args.proto_lr, args.proto_threshold,
-            args.proto_weight, args.logit_weight, args.proto_conf_threshold,
+            proto_lambda, args.proto_conf_threshold,
             args.proto_agreement_threshold, args.proto_reliability_mode, args.proto_active_threshold,
             args.proto_active_min, args.proto_active_max, args.proto_hs_alpha, args.proto_hs_gamma, args.proto_usage_weight,
             args.proto_objective, args.proto_target_source, args.proto_consistency_weight,

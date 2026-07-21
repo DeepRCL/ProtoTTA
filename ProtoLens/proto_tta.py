@@ -26,7 +26,8 @@ class ProtoTTA(nn.Module):
     def __init__(self, model, optimizer, steps=1, episodic=False,
                  use_geometric_filter=True, geo_filter_threshold=0.3,
                  consensus_strategy='max', consensus_ratio=0.5,
-                 importance_mode='global', sigmoid_temperature=5.0):
+                 importance_mode='global', sigmoid_temperature=5.0,
+                 logit_weight=0.0):
         """
         Args:
             model: ProtoLens model (must return similarity as 4th output)
@@ -66,6 +67,9 @@ class ProtoTTA(nn.Module):
         
         # Sigmoid temperature for loss computation
         self.sigmoid_temperature = sigmoid_temperature
+
+        # Unified λ: fraction of logit-entropy in total loss (0 = pure proto, 1 = pure logit)
+        self.logit_weight = logit_weight
         
         # Filter mode - 'geometric' or 'none'
         self.filter_mode = 'geometric' if use_geometric_filter else 'none'
@@ -105,6 +109,7 @@ class ProtoTTA(nn.Module):
                 consensus_ratio=self.consensus_ratio,
                 importance_mode=self.importance_mode,
                 sigmoid_temperature=self.sigmoid_temperature,
+                logit_weight=self.logit_weight,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 special_tokens_mask=special_tokens_mask,
@@ -195,7 +200,7 @@ def binary_entropy_loss(similarities, epsilon=1e-8):
 @torch.enable_grad()
 def forward_and_adapt_proto(model, optimizer, use_geometric_filter, geo_filter_threshold,
                             consensus_strategy, consensus_ratio, importance_mode='global',
-                            sigmoid_temperature=5.0,
+                            sigmoid_temperature=5.0, logit_weight=0.0,
                             input_ids=None, attention_mask=None, special_tokens_mask=None,
                             mode="test", original_text=None, current_batch_num=None,
                             adaptation_stats=None, **kwargs):
@@ -237,6 +242,7 @@ def forward_and_adapt_proto(model, optimizer, use_geometric_filter, geo_filter_t
         # If forward pass fails, try running without gradients to get valid outputs
         if adaptation_stats is not None:
             adaptation_stats['early_exit_stats']['exception_count'] += 1
+        print(f"[PROTOTTA EXCEPTION] forward() with grad raised {type(e).__name__}: {e}")
         optimizer.zero_grad()
         
         # Try to get valid outputs without gradients
@@ -251,9 +257,11 @@ def forward_and_adapt_proto(model, optimizer, use_geometric_filter, geo_filter_t
                     current_batch_num=current_batch_num,
                     **kwargs
                 )
+            print(f"[PROTOTTA EXCEPTION] retry without grad SUCCEEDED (num_adapted=0 this batch)")
             return outputs.detach(), loss_mu, augmented_loss, similarities, 0
-        except:
-            # Total failure - return dummy outputs as last resort  
+        except Exception as e2:
+            # Total failure - return dummy outputs as last resort
+            print(f"[PROTOTTA EXCEPTION] retry without grad ALSO FAILED with {type(e2).__name__}: {e2} -> returning DUMMY ZERO outputs")
             batch_size = input_ids.size(0) if input_ids is not None else 1
             num_classes = 2  # Binary classification
             device = input_ids.device if input_ids is not None else 'cpu'
@@ -448,9 +456,17 @@ def forward_and_adapt_proto(model, optimizer, use_geometric_filter, geo_filter_t
                 adaptation_stats['early_exit_stats']['nan_loss_count'] += 1
             optimizer.zero_grad()
             return outputs.detach(), loss_mu, augmented_loss, similarities, 0
+
+        # Unified λ: blend prototype entropy with logit entropy
+        # L = (1-λ)*proto_loss + λ*logit_entropy
+        if logit_weight > 0:
+            logit_ent = -(outputs_filtered.softmax(1) * outputs_filtered.log_softmax(1)).sum(1)
+            loss_logit = logit_ent.mean()
+            if not (torch.isnan(loss_logit) or torch.isinf(loss_logit)):
+                loss = (1.0 - logit_weight) * loss + logit_weight * loss_logit
     else:
         loss = torch.tensor(0.0, device=outputs.device, requires_grad=True)
-    
+
     # Backward and update
     if num_reliable > 0 and loss.requires_grad:
         loss.backward()

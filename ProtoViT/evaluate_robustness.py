@@ -23,6 +23,7 @@ import json
 import time
 from datetime import datetime
 import logging
+import random
 from tqdm import tqdm
 
 # Import ProtoViT modules
@@ -43,6 +44,15 @@ from efficiency_metrics import EfficiencyTracker, compare_efficiency_metrics
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def seed_everything(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 # Set seeds
 torch.manual_seed(0)
@@ -88,15 +98,26 @@ def setup_tent(model):
     return tent.Tent(model, optimizer, steps=cfg.OPTIM.STEPS, episodic=cfg.MODEL.EPISODIC)
 
 
-def setup_proto_entropy(model, use_importance=False, use_confidence=False, 
-                        reset_mode=None, reset_frequency=10, 
+def setup_proto_entropy(model, use_importance=False, use_confidence=False,
+                        reset_mode=None, reset_frequency=10,
                         confidence_threshold=0.7, ema_alpha=0.999,
                         use_geometric_filter=False, geo_filter_threshold=0.3,
                         consensus_strategy='max', consensus_ratio=0.5,
                         adaptation_mode='layernorm_only',
                         use_ensemble_entropy=False,
                         source_proto_stats=None, alpha_source_kl=0.0,
-                        adapt_all_prototypes=False):
+                        adapt_all_prototypes=False,
+                        logit_weight=0.0,
+                        shared_confidence_weighting=False,
+                        gradient_normalize=False,
+                        adaptive_lambda=False,
+                        adaptive_lambda_strategy='relative_reliability',
+                        adaptive_delta0=0.25,
+                        adaptive_topk=3,
+                        lambda_ema_momentum=0.9,
+                        lambda_min=0.05,
+                        lambda_max=0.95,
+                        record_diagnostics=False):
     """Set up Prototype Entropy adaptation (without threshold).
     
     Args:
@@ -138,7 +159,18 @@ def setup_proto_entropy(model, use_importance=False, use_confidence=False,
         use_ensemble_entropy=use_ensemble_entropy,
         source_proto_stats=source_proto_stats,
         alpha_source_kl=alpha_source_kl,
-        adapt_all_prototypes=adapt_all_prototypes
+        adapt_all_prototypes=adapt_all_prototypes,
+        logit_weight=logit_weight,
+        shared_confidence_weighting=shared_confidence_weighting,
+        gradient_normalize=gradient_normalize,
+        adaptive_lambda=adaptive_lambda,
+        adaptive_lambda_strategy=adaptive_lambda_strategy,
+        adaptive_delta0=adaptive_delta0,
+        adaptive_topk=adaptive_topk,
+        lambda_ema_momentum=lambda_ema_momentum,
+        lambda_min=lambda_min,
+        lambda_max=lambda_max,
+        record_diagnostics=record_diagnostics,
     )
     return proto_model
 
@@ -343,7 +375,8 @@ def save_results_json(output_file, results_dict, metadata=None):
 def evaluate_single_combination(model_path, corruption_type, severity, data_dir, 
                               clean_data_dir, on_the_fly, mode_name, mode_config, 
                               device, batch_size, fishers=None, proto_evaluator=None,
-                              compute_proto_metrics=False, track_efficiency=False):
+                              compute_proto_metrics=False, track_efficiency=False,
+                              seed=0):
     """Evaluate a single mode on a single corruption-severity combination.
     
     Args:
@@ -360,6 +393,7 @@ def evaluate_single_combination(model_path, corruption_type, severity, data_dir,
     efficiency_tracker = EfficiencyTracker(mode_name, device=str(device)) if track_efficiency else None
     base_model = None
     eval_model = None
+    seed_everything(seed)
     
     try:
         # Load data
@@ -399,7 +433,18 @@ def evaluate_single_combination(model_path, corruption_type, severity, data_dir,
                 adaptation_mode=mode_config.get('adaptation_mode', 'layernorm_only'),
                 use_ensemble_entropy=mode_config.get('use_ensemble_entropy', False),
                 source_proto_stats=mode_config.get('source_proto_stats', None),
-                alpha_source_kl=mode_config.get('alpha_source_kl', 0.0)
+                alpha_source_kl=mode_config.get('alpha_source_kl', 0.0),
+                logit_weight=mode_config.get('logit_weight', 0.0),
+                shared_confidence_weighting=mode_config.get('shared_confidence_weighting', False),
+                gradient_normalize=mode_config.get('gradient_normalize', False),
+                adaptive_lambda=mode_config.get('adaptive_lambda', False),
+                adaptive_lambda_strategy=mode_config.get('adaptive_lambda_strategy', 'relative_reliability'),
+                adaptive_delta0=mode_config.get('adaptive_delta0', 0.25),
+                adaptive_topk=mode_config.get('adaptive_topk', 3),
+                lambda_ema_momentum=mode_config.get('lambda_ema_momentum', 0.9),
+                lambda_min=mode_config.get('lambda_min', 0.05),
+                lambda_max=mode_config.get('lambda_max', 0.95),
+                record_diagnostics=mode_config.get('record_diagnostics', False),
             )
             
             # Reset geo filter stats if applicable
@@ -495,18 +540,18 @@ def evaluate_single_combination(model_path, corruption_type, severity, data_dir,
                     'avg_updates_per_sample': proto_metrics.get('avg_updates_per_sample'),
                 })
         
+        if eval_model is not None:
+            if hasattr(eval_model, 'adaptation_stats'):
+                result['adaptation_stats'] = eval_model.adaptation_stats.copy()
+            elif hasattr(eval_model, 'model') and hasattr(eval_model.model, 'adaptation_stats'):
+                result['adaptation_stats'] = eval_model.model.adaptation_stats.copy()
+
         # Add efficiency metrics if tracking
         if efficiency_tracker:
             efficiency_metrics = efficiency_tracker.get_metrics()
             result['efficiency'] = efficiency_metrics
             
-            # Also extract adaptation stats from the model if available
-            if eval_model is not None:
-                if hasattr(eval_model, 'adaptation_stats'):
-                    result['adaptation_stats'] = eval_model.adaptation_stats.copy()
-                elif hasattr(eval_model, 'model') and hasattr(eval_model.model, 'adaptation_stats'):
-                    result['adaptation_stats'] = eval_model.model.adaptation_stats.copy()
-        
+
         return result
         
     except Exception as e:
@@ -548,10 +593,13 @@ def main():
                        help='Generate corruptions on-the-fly instead of loading pre-generated')
     parser.add_argument('--batch_size', type=int, default=None,
                        help=f'Batch size for evaluation (default: {test_batch_size} from settings)')
+    parser.add_argument('--seed', type=int, default=0)
     
     # Output
     parser.add_argument('--output', type=str, default='./robustness_results_sev5.json',
                        help='Path to save results JSON')
+    parser.add_argument('--overwrite', action='store_true',
+                        help='Start a fresh result file instead of resuming')
     
     # Hardware
     parser.add_argument('--gpuid', type=str, default='0',
@@ -570,8 +618,39 @@ def main():
                        help='Track and report computational efficiency metrics (timing, adapted parameters, etc.)')
     parser.add_argument('--use-enhanced-metrics', action='store_true', default=False,
                        help='Use enhanced prototype metrics (PCA-Weighted, Calibration, GT Class Contribution).')
-    
+    parser.add_argument('--modes', nargs='+', default=None,
+                       help='Subset of modes to run. Choices: normal tent loss eata sar '
+                            'proto_imp_conf_v1 proto_imp_conf_v2 proto_imp_conf_v3. '
+                            'Default: all modes.')
+    parser.add_argument('--corruptions', nargs='+', default=['all'],
+                        help='"all" or a subset of CUB-C corruption names')
+    parser.add_argument('--proto-lambda', type=float, default=1.0,
+                       help='Unified ProtoTTA interpolation λ ∈ [0,1]: '
+                            '1.0 = pure prototype entropy (ProtoTTA), '
+                            '0.0 = pure logit entropy (Tent-style), '
+                            '0.7 = ProtoTTA+ default. '
+                            'Loss = λ*proto_loss + (1-λ)*logit_entropy. (default: 1.0)')
+    parser.add_argument('--proto-shared-confidence-weighting', action='store_true',
+                        help='Apply the same confidence weight to both component losses')
+    parser.add_argument('--proto-gradient-normalize', action='store_true',
+                        help='Normalize component losses by their gradient norms')
+    parser.add_argument('--proto-lambda-ema-momentum', type=float, default=0.9)
+    parser.add_argument('--proto-adaptive-strategy', default='relative_reliability',
+                        choices=['relative_reliability', 'activation_margin'])
+    parser.add_argument('--proto-adaptive-delta0', type=float, default=0.25)
+    parser.add_argument('--proto-adaptive-topk', type=int, default=3)
+    parser.add_argument('--proto-lambda-min', type=float, default=0.05)
+    parser.add_argument('--proto-lambda-max', type=float, default=0.95)
+    parser.add_argument('--proto-record-diagnostics', action='store_true')
+
     args = parser.parse_args()
+    if not 0.0 <= args.proto_lambda <= 1.0:
+        parser.error('--proto-lambda must be between 0 and 1')
+    if not 0.0 <= args.proto_lambda_min <= args.proto_lambda_max <= 1.0:
+        parser.error('Require 0 <= --proto-lambda-min <= --proto-lambda-max <= 1')
+    if args.proto_adaptive_delta0 <= 0 or args.proto_adaptive_topk < 1:
+        parser.error('--proto-adaptive-delta0 must be > 0 and --proto-adaptive-topk >= 1')
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     
     # Setup device
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpuid
@@ -594,11 +673,38 @@ def main():
         'shot_noise', 
         'speckle_noise'
     ]
+    if 'all' not in args.corruptions:
+        unknown_corruptions = [name for name in args.corruptions if name not in corruption_types]
+        if unknown_corruptions:
+            parser.error(f'Unknown corruptions: {unknown_corruptions}')
+        corruption_types = list(args.corruptions)
     severity = 5
     severity_key = str(severity)
     
     # Define modes with their configurations
     # proto_imp_conf has 3 variations
+    _logit_w = 1.0 - args.proto_lambda
+    proto_common = {
+        'use_geometric_filter': True,
+        'geo_filter_threshold': 0.92,
+        'consensus_strategy': 'top_k_mean',
+        'adaptation_mode': 'layernorm_attn_bias',
+        'use_ensemble_entropy': False,
+        'reset_mode': None,
+        'reset_frequency': 10,
+        'confidence_threshold': 0.7,
+        'ema_alpha': 0.999,
+        'consensus_ratio': 0.5,
+        'shared_confidence_weighting': args.proto_shared_confidence_weighting,
+        'gradient_normalize': args.proto_gradient_normalize,
+        'lambda_ema_momentum': args.proto_lambda_ema_momentum,
+        'adaptive_lambda_strategy': args.proto_adaptive_strategy,
+        'adaptive_delta0': args.proto_adaptive_delta0,
+        'adaptive_topk': args.proto_adaptive_topk,
+        'lambda_min': args.proto_lambda_min,
+        'lambda_max': args.proto_lambda_max,
+        'record_diagnostics': args.proto_record_diagnostics,
+    }
     modes = {
         'normal': {},
         'tent': {},
@@ -613,6 +719,7 @@ def main():
             'confidence_threshold': 0.7,
             'ema_alpha': 0.999,
             'consensus_ratio': 0.5,
+            'logit_weight': _logit_w,
         },
         'proto_imp_conf_v2': {  # Without layernorm_attn_bias (default layernorm_only)
             'use_geometric_filter': True,
@@ -625,24 +732,29 @@ def main():
             'confidence_threshold': 0.7,
             'ema_alpha': 0.999,
             'consensus_ratio': 0.5,
+            'logit_weight': _logit_w,
         },
         'proto_imp_conf_v3': {  # Without use_ensemble_entropy
-            'use_geometric_filter': True,
-            'geo_filter_threshold': 0.92,
-            'consensus_strategy': 'top_k_mean',
-            'adaptation_mode': 'layernorm_attn_bias',
-            'use_ensemble_entropy': False,  # Disabled
-            'reset_mode': None,
-            'reset_frequency': 10,
-            'confidence_threshold': 0.7,
-            'ema_alpha': 0.999,
-            'consensus_ratio': 0.5,
+            **proto_common,
+            'logit_weight': _logit_w,
+        },
+        'proto_imp_conf_adaptive': {
+            **proto_common,
+            'logit_weight': 0.5,
+            'adaptive_lambda': True,
         },
         'loss': {},
         'eata': {},
         'sar': {},
     }
-    
+
+    # Filter to requested subset of modes
+    if args.modes is not None:
+        unknown = [m for m in args.modes if m not in modes]
+        if unknown:
+            raise ValueError(f"Unknown modes: {unknown}. Valid: {list(modes.keys())}")
+        modes = {m: modes[m] for m in args.modes}
+
     # Compute Fishers GLOBAL if requested (Clean Data Access)
     fishers = None
     if 'eata' in modes and args.use_clean_fisher:
@@ -734,7 +846,7 @@ def main():
         torch.cuda.empty_cache()
     
     # Load existing results if available
-    existing_results = load_results_json(args.output)
+    existing_results = None if args.overwrite else load_results_json(args.output)
     if existing_results:
         results_dict = existing_results.get('results', {})
         print(f"Loaded existing results from {args.output}")
@@ -805,7 +917,8 @@ def main():
             fishers=fishers,
             proto_evaluator=proto_evaluator,
             compute_proto_metrics=args.prototype_metrics,
-            track_efficiency=args.track_efficiency
+            track_efficiency=args.track_efficiency,
+            seed=args.seed,
         )
         
         # Update results

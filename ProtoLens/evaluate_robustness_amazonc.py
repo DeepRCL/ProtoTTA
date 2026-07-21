@@ -62,6 +62,19 @@ torch.cuda.manual_seed_all(0)
 np.random.seed(0)
 random.seed(0)
 
+# Force full determinism: online TTA is a feedback loop (each batch's
+# adaptation affects the next), so any non-deterministic backward kernel
+# (e.g. atomicAdd-based ops) can get amplified over many steps into a
+# completely different converged-vs-collapsed outcome across runs/allocations.
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.allow_tf32 = False
+torch.backends.cuda.matmul.allow_tf32 = False
+try:
+    torch.use_deterministic_algorithms(True, warn_only=True)
+except TypeError:
+    torch.use_deterministic_algorithms(True)
+
 
 # ============================================================================
 # Configuration
@@ -394,20 +407,24 @@ def setup_eata(model, adaptation_mode, e_margin, d_margin):
 
 
 def setup_prototta(model, adaptation_mode, use_geo_filter, geo_threshold,
-                   importance_mode='global', sigmoid_temperature=5.0):
+                   importance_mode='global', sigmoid_temperature=5.0,
+                   logit_weight=0.0):
     model = adapt_utils.configure_model(model, adaptation_mode)
     params, param_names = adapt_utils.collect_params(model, adaptation_mode)
     print(f"ProtoTTA: Adapting {len(params)} parameter groups")
     print(f"  Geometric filter: {use_geo_filter}, Threshold: {geo_threshold}")
     print(f"  Sigmoid temperature: {sigmoid_temperature}")
+    print(f"  logit_weight: {logit_weight:.2f}  (proto={1-logit_weight:.2f}, logit={logit_weight:.2f})")
     optimizer = setup_optimizer(params)
     return proto_tta.ProtoTTA(model, optimizer, steps=cfg.OPTIM.STEPS,
                               episodic=cfg.MODEL.EPISODIC,
                               use_geometric_filter=use_geo_filter,
                               geo_filter_threshold=geo_threshold,
-                              consensus_strategy='max',
+                              consensus_strategy='top_k_mean',
+                              consensus_ratio=0.5,
                               importance_mode=importance_mode,
-                              sigmoid_temperature=sigmoid_temperature)
+                              sigmoid_temperature=sigmoid_temperature,
+                              logit_weight=logit_weight)
 
 
 def setup_sar(model, adaptation_mode):
@@ -741,6 +758,9 @@ def parse_args():
     parser.add_argument('--geo_threshold', type=float, default=0.1)
     parser.add_argument('--sigmoid_temperature', type=float, default=5.0)
     parser.add_argument('--importance_mode', type=str, default='global')
+    parser.add_argument('--proto_lambda', type=float, default=1.0,
+                       help='Unified ProtoTTA λ ∈ [0,1]: 1.0=pure prototype entropy (ProtoTTA), '
+                            '0.0=pure logit entropy, 0.7=ProtoTTA+ default. (default: 1.0)')
     
     # Prototype metrics
     parser.add_argument('--prototype-metrics', action='store_true', default=True,
@@ -970,7 +990,8 @@ def main():
                     tta_model = setup_eata(model, args.adaptation_mode, args.e_margin, args.d_margin)
                 elif method == 'prototta':
                     tta_model = setup_prototta(model, args.adaptation_mode, use_geo, args.geo_threshold,
-                                              args.importance_mode, args.sigmoid_temperature)
+                                              args.importance_mode, args.sigmoid_temperature,
+                                              logit_weight=1.0 - args.proto_lambda)
                 elif method == 'sar':
                     tta_model = setup_sar(model, args.adaptation_mode)
                 

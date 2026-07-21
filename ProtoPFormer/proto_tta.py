@@ -90,9 +90,19 @@ def collect_params(model, adaptation_mode='layernorm_only'):
 
     return params, names
 
-def configure_model(model, adaptation_mode='layernorm_only'):
-    """Put model in train mode and enable only the target parameters."""
-    model.train()
+def configure_model(model, adaptation_mode='layernorm_only', model_mode='train'):
+    """Configure adaptation parameters and the explicitly requested model mode.
+
+    ``train`` matches the upstream Tent/EATA implementations and the historical
+    paper runs. ``eval`` is a deterministic transformer ablation that disables
+    DropPath/dropout; it must not be silently reported as standard Tent.
+    """
+    if model_mode == 'train':
+        model.train()
+    elif model_mode == 'eval':
+        model.eval()
+    else:
+        raise ValueError(f"Unknown adaptation model mode: {model_mode}")
     model.requires_grad_(False)
 
     params, names = collect_params(model, adaptation_mode)
@@ -102,6 +112,7 @@ def configure_model(model, adaptation_mode='layernorm_only'):
     # Ensure BN layers use current batch stats (standard TTA practice)
     for m in model.modules():
         if isinstance(m, (nn.BatchNorm2d, nn.SyncBatchNorm)):
+            m.train()
             m.track_running_stats = False
             m.running_mean = None
             m.running_var = None
@@ -166,8 +177,8 @@ def softmax_entropy(logits):
     return -(p * torch.log(p + 1e-6)).sum(dim=1)
 
 
-def setup_tent(model, lr=1e-3, steps=1, episodic=False):
-    model = configure_model(model, 'layernorm_only')
+def setup_tent(model, lr=1e-3, steps=1, episodic=False, model_mode='train'):
+    model = configure_model(model, 'layernorm_only', model_mode=model_mode)
     params, _ = collect_params(model, 'layernorm_only')
     optimizer = torch.optim.Adam(params, lr=lr, betas=(0.9, 0.999))
     return Tent(model, optimizer, steps=steps, episodic=episodic)
@@ -292,8 +303,9 @@ class EATA(nn.Module):
             return getattr(self.model, name)
 
 
-def setup_eata(model, fishers=None, lr=1e-3, steps=1, episodic=False):
-    model = configure_model(model, 'layernorm_only')
+def setup_eata(model, fishers=None, lr=1e-3, steps=1, episodic=False,
+               model_mode='train'):
+    model = configure_model(model, 'layernorm_only', model_mode=model_mode)
     params, _ = collect_params(model, 'layernorm_only')
     optimizer = torch.optim.Adam(params, lr=lr, betas=(0.9, 0.999))
     return EATA(model, optimizer, fishers=fishers, steps=steps, episodic=episodic)
@@ -351,6 +363,20 @@ class ProtoTTA(nn.Module):
                  sigmoid_temp=1.0,
                  proto_weight=1.0,
                  logit_weight=0.0,
+                 shared_confidence_weighting=False,
+                 gradient_normalize=False,
+                 adaptive_lambda=False,
+                 adaptive_lambda_strategy='relative_reliability',
+                 adaptive_delta0=0.25,
+                 adaptive_topk=3,
+                 lambda_ema_momentum=0.9,
+                 lambda_min=0.05,
+                 lambda_max=0.95,
+                 record_diagnostics=False,
+                 lambda_search=False,
+                 lambda_search_radius=0.1,
+                 lambda_search_teacher_temp=0.5,
+                 lambda_search_min_improvement=0.0,
                  ):
         super().__init__()
         self.model = model
@@ -377,6 +403,21 @@ class ProtoTTA(nn.Module):
         self.sigmoid_temp = sigmoid_temp
         self.proto_weight = proto_weight
         self.logit_weight = logit_weight
+        self.shared_confidence_weighting = shared_confidence_weighting
+        self.gradient_normalize = gradient_normalize
+        self.adaptive_lambda = adaptive_lambda
+        self.adaptive_lambda_strategy = adaptive_lambda_strategy
+        self.adaptive_delta0 = adaptive_delta0
+        self.adaptive_topk = adaptive_topk
+        self.lambda_ema_momentum = lambda_ema_momentum
+        self.lambda_min = lambda_min
+        self.lambda_max = lambda_max
+        self.record_diagnostics = record_diagnostics
+        self.lambda_search = lambda_search
+        self.lambda_search_radius = lambda_search_radius
+        self.lambda_search_teacher_temp = lambda_search_teacher_temp
+        self.lambda_search_min_improvement = lambda_search_min_improvement
+        self.lambda_ema = None
 
         self.model_state, self.optimizer_state = \
             copy_model_and_optimizer(model, optimizer)
@@ -394,6 +435,19 @@ class ProtoTTA(nn.Module):
             'total_updates': 0,
             'branch_agreement_samples': 0,
             'avg_reliability': [],
+            'proto_loss': [],
+            'output_loss': [],
+            'proto_grad_norm': [],
+            'output_grad_norm': [],
+            'adaptive_lambda': [],
+            'adaptive_lambda_raw': [],
+            'proto_signal_reliability': [],
+            'output_signal_reliability': [],
+            'lambda_search_selected': [],
+            'lambda_search_base_score': [],
+            'lambda_search_selected_score': [],
+            'lambda_search_accepted': 0,
+            'lambda_search_rejected': 0,
         }
 
     # -------------------------------------------------------------------------
@@ -491,16 +545,17 @@ class ProtoTTA(nn.Module):
                 self.adaptation_stats['avg_reliability'].append(float(reliability_score.mean().item()))
                 if reliable_mask.sum() == 0:
                     # If whole batch is filtered, run in eval mode to avoid BN artifacts
+                    was_training = self.model.training
                     self.model.eval()
                     with torch.no_grad():
                         out_eval = self.model(x)
-                    self.model.train()
+                    self.model.train(was_training)
                     return _get_logits(out_eval)
         else:
             reliable_mask = torch.ones(x.size(0), device=x.device)
-            self.adaptation_stats['adapted_samples'] += x.size(0)
+            adapted = x.size(0)
+            self.adaptation_stats['adapted_samples'] += adapted
 
-        self.adaptation_stats['total_updates'] += 1
         sample_w = reliable_mask.unsqueeze(1)  # (B, 1)
 
         # --- 4. Entropy over target prototypes for each branch ---
@@ -539,18 +594,110 @@ class ProtoTTA(nn.Module):
             proto_loss = (loss_per_sample * reliable_mask).sum() / \
                          (reliable_mask.sum() + 1e-8)
 
-        logit_loss = torch.tensor(0.0, device=logits.device)
-        if self.logit_weight > 0:
-            entropy_per_sample = softmax_entropy(logits)
-            logit_loss = (entropy_per_sample * reliable_mask).sum() / \
-                         (reliable_mask.sum() + 1e-8)
+        entropy_per_sample = softmax_entropy(logits)
+        logit_sample_weight = reliable_mask
+        if self.shared_confidence_weighting and self.use_confidence:
+            logit_sample_weight = logit_sample_weight * confidence
+        logit_loss = (entropy_per_sample * logit_sample_weight).sum() / \
+                     (reliable_mask.sum() + 1e-8)
 
-        total_loss = self.proto_weight * proto_loss + self.logit_weight * logit_loss
+        proto_reliability = self._prototype_reliability(
+            local_scores, global_scores, pred_class,
+            local_proto_identities, global_proto_identities,
+        )
+        output_probs = logits.softmax(dim=1)
+        output_reliability = 1.0 - (
+            -(output_probs * torch.log(output_probs.clamp_min(1e-8))).sum(dim=1)
+            / math.log(output_probs.shape[1])
+        )
+
+        proto_weight = self.proto_weight
+        logit_weight = self.logit_weight
+        if self.adaptive_lambda:
+            valid = reliable_mask.bool()
+            if self.adaptive_lambda_strategy == 'activation_margin':
+                adaptive_score = self._prototype_activation_margin(
+                    local_scores, global_scores, pred_class,
+                    local_proto_identities, global_proto_identities,
+                )
+            elif self.adaptive_lambda_strategy == 'relative_reliability':
+                adaptive_score = proto_reliability / (
+                    proto_reliability + output_reliability + 1e-8
+                )
+            else:
+                raise ValueError(f"Unknown adaptive lambda strategy: {self.adaptive_lambda_strategy}")
+            current_lambda = adaptive_score[valid].mean().detach().item()
+            if self.lambda_ema is None:
+                self.lambda_ema = current_lambda
+            else:
+                self.lambda_ema = (self.lambda_ema_momentum * self.lambda_ema +
+                                   (1.0 - self.lambda_ema_momentum) * current_lambda)
+            proto_weight = min(self.lambda_max, max(self.lambda_min, self.lambda_ema))
+            logit_weight = 1.0 - proto_weight
+
+        need_grad_norms = self.gradient_normalize or self.record_diagnostics
+        proto_grad_norm = self._gradient_norm(proto_loss) if need_grad_norms else None
+        output_grad_norm = self._gradient_norm(logit_loss) if need_grad_norms else None
+        proto_term = proto_loss
+        output_term = logit_loss
+        if self.gradient_normalize:
+            proto_term = proto_loss / (proto_grad_norm.detach() + 1e-8)
+            output_term = logit_loss / (output_grad_norm.detach() + 1e-8)
+
+        search_result = None
+        if self.lambda_search:
+            if not self.adaptive_lambda:
+                raise ValueError('lambda_search requires adaptive_lambda=True')
+            search_result = self._select_and_apply_lambda_update(
+                x=x,
+                base_lambda=proto_weight,
+                proto_term=proto_term,
+                output_term=output_term,
+            )
+            if search_result['accepted']:
+                proto_weight = search_result['selected_lambda']
+                logit_weight = 1.0 - proto_weight
+                self.adaptation_stats['total_updates'] += 1
+                self.adaptation_stats['lambda_search_accepted'] += 1
+            else:
+                # This batch contributed no parameter update.
+                self.adaptation_stats['adapted_samples'] -= adapted
+                self.adaptation_stats['lambda_search_rejected'] += 1
+
+        total_loss = proto_weight * proto_term + logit_weight * output_term
+
+        if self.record_diagnostics or self.adaptive_lambda:
+            valid = reliable_mask.bool()
+            self.adaptation_stats['proto_loss'].append(float(proto_loss.detach().item()))
+            self.adaptation_stats['output_loss'].append(float(logit_loss.detach().item()))
+            if proto_grad_norm is not None:
+                self.adaptation_stats['proto_grad_norm'].append(float(proto_grad_norm.item()))
+                self.adaptation_stats['output_grad_norm'].append(float(output_grad_norm.item()))
+            self.adaptation_stats['adaptive_lambda'].append(float(proto_weight))
+            if self.adaptive_lambda:
+                self.adaptation_stats['adaptive_lambda_raw'].append(float(current_lambda))
+            self.adaptation_stats['proto_signal_reliability'].append(
+                float(proto_reliability[valid].mean().detach().item()))
+            self.adaptation_stats['output_signal_reliability'].append(
+                float(output_reliability[valid].mean().detach().item()))
+            if search_result is not None:
+                selected = search_result['selected_lambda']
+                self.adaptation_stats['lambda_search_selected'].append(
+                    None if selected is None else float(selected)
+                )
+                self.adaptation_stats['lambda_search_base_score'].append(
+                    float(search_result['base_score'])
+                )
+                self.adaptation_stats['lambda_search_selected_score'].append(
+                    float(search_result['selected_score'])
+                )
 
         # --- 6. Backward ---
-        total_loss.backward()
-        self.optimizer.step()
-        self.optimizer.zero_grad()
+        if not self.lambda_search:
+            total_loss.backward()
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+            self.adaptation_stats['total_updates'] += 1
 
         return logits
 
@@ -570,13 +717,20 @@ class ProtoTTA(nn.Module):
         local_acts = None
         global_acts = None
 
-        if len(aux) >= 6 and isinstance(aux[5], torch.Tensor):
+        # ProtoPFormer exposes different auxiliary tuples by mode:
+        #   eval:  (..., logits_local, local_acts, global_acts)  [len=6]
+        #   train: (..., original_fea_len, local_acts, global_acts) [len=7]
+        if len(aux) >= 7 and isinstance(aux[5], torch.Tensor):
             local_acts = aux[5]
+        elif len(aux) == 6 and isinstance(aux[4], torch.Tensor):
+            local_acts = aux[4]
         elif len(aux) >= 3 and isinstance(aux[2], torch.Tensor) and aux[2].dim() == 4:
             local_acts = self._consensus(aux[2].flatten(2))
 
         if len(aux) >= 7 and isinstance(aux[6], torch.Tensor):
             global_acts = aux[6]
+        elif len(aux) == 6 and isinstance(aux[5], torch.Tensor):
+            global_acts = aux[5]
 
         return local_acts, global_acts
 
@@ -609,6 +763,173 @@ class ProtoTTA(nn.Module):
 
         masked_e = entropy * target_mask * sample_w
         return masked_e.sum(dim=1) / (target_mask.sum(dim=1) + 1e-8)
+
+    def _branch_reliability(self, sim_scores, pred_class, proto_identities):
+        """Label-free concentration and strength of predicted-class prototypes."""
+        if sim_scores is None or proto_identities is None:
+            return None
+        target_mask = (proto_identities.unsqueeze(0) == pred_class.unsqueeze(1)).float()
+        target_scores = sim_scores * target_mask
+        q = target_scores / target_scores.sum(dim=1, keepdim=True).clamp_min(1e-8)
+        entropy = -(q * torch.log(q.clamp_min(1e-8))).sum(dim=1)
+        num_target = target_mask.sum(dim=1).clamp_min(2.0)
+        concentration = 1.0 - entropy / torch.log(num_target)
+        strength = target_scores.max(dim=1).values / sim_scores.max(dim=1).values.clamp_min(1e-8)
+        return (concentration * strength).clamp(0.0, 1.0)
+
+    def _prototype_reliability(self, local_scores, global_scores, pred_class,
+                               local_proto_identities, global_proto_identities):
+        local = self._branch_reliability(local_scores, pred_class, local_proto_identities)
+        global_ = self._branch_reliability(global_scores, pred_class, global_proto_identities)
+        if local is None:
+            return global_
+        if global_ is None:
+            return local
+        global_coe = float(getattr(self.model, 'global_coe', 0.5))
+        return (1.0 - global_coe) * local + global_coe * global_
+
+    def _branch_activation_margin(self, sim_scores, pred_class, proto_identities):
+        """Normalized top-target distance from the binary-entropy boundary 0.5."""
+        if sim_scores is None or proto_identities is None:
+            return None
+        target_mask = proto_identities.unsqueeze(0) == pred_class.unsqueeze(1)
+        masked = sim_scores.masked_fill(~target_mask, float('-inf'))
+        k = min(self.adaptive_topk, int(target_mask.sum(dim=1).min().item()))
+        top_target = masked.topk(max(k, 1), dim=1).values
+        delta = (top_target - 0.5).abs().mean(dim=1)
+        return (delta / max(self.adaptive_delta0, 1e-8)).clamp(0.0, 1.0)
+
+    def _prototype_activation_margin(self, local_scores, global_scores, pred_class,
+                                     local_proto_identities, global_proto_identities):
+        local = self._branch_activation_margin(local_scores, pred_class, local_proto_identities)
+        global_ = self._branch_activation_margin(global_scores, pred_class, global_proto_identities)
+        if local is None:
+            return global_
+        if global_ is None:
+            return local
+        global_coe = float(getattr(self.model, 'global_coe', 0.5))
+        return (1.0 - global_coe) * local + global_coe * global_
+
+    def _gradient_norm(self, loss):
+        params = [
+            p for group in self.optimizer.param_groups for p in group['params']
+            if p.requires_grad
+        ]
+        grads = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=True)
+        squared = [g.detach().float().pow(2).sum() for g in grads if g is not None]
+        if not squared:
+            return loss.detach().new_tensor(0.0)
+        return torch.stack(squared).sum().sqrt()
+
+    def _optimizer_params(self):
+        """Return each optimizer parameter once, preserving group order."""
+        params = []
+        seen = set()
+        for group in self.optimizer.param_groups:
+            for param in group['params']:
+                if param.requires_grad and id(param) not in seen:
+                    params.append(param)
+                    seen.add(id(param))
+        return params
+
+    @staticmethod
+    def _set_weighted_grads(params, proto_grads, output_grads, proto_weight):
+        for param, proto_grad, output_grad in zip(params, proto_grads, output_grads):
+            if proto_grad is None and output_grad is None:
+                param.grad = None
+                continue
+            grad = torch.zeros_like(param)
+            if proto_grad is not None:
+                grad.add_(proto_grad, alpha=proto_weight)
+            if output_grad is not None:
+                grad.add_(output_grad, alpha=1.0 - proto_weight)
+            param.grad = grad
+
+    def _restore_search_state(self, params, param_state, optimizer_state):
+        with torch.no_grad():
+            for param, value in zip(params, param_state):
+                param.copy_(value)
+        self.optimizer.load_state_dict(deepcopy(optimizer_state))
+        self.optimizer.zero_grad()
+
+    def _search_score(self, teacher_probs, candidate_logits):
+        """Cross-view soft pseudo-label score; lower is better."""
+        candidate_log_probs = candidate_logits.log_softmax(dim=1)
+        return -(teacher_probs * candidate_log_probs).sum(dim=1).mean()
+
+    def _select_and_apply_lambda_update(self, x, base_lambda, proto_term, output_term):
+        """Select a local lambda by virtual Adam updates and commit it safely.
+
+        The candidates are ``lambda_hat +/- radius`` and ``lambda_hat``.  Each
+        virtual update starts from the exact same model and optimizer state.
+        It is scored on a deterministic horizontal-flip view against a frozen,
+        sharpened pre-update teacher.  The unchanged model is an explicit
+        candidate, so an update is committed only when it improves this
+        label-free cross-view score.
+        """
+        params = self._optimizer_params()
+        proto_grads = torch.autograd.grad(
+            proto_term, params, retain_graph=True, allow_unused=True
+        )
+        output_grads = torch.autograd.grad(
+            output_term, params, retain_graph=False, allow_unused=True
+        )
+        proto_grads = tuple(None if grad is None else grad.detach() for grad in proto_grads)
+        output_grads = tuple(None if grad is None else grad.detach() for grad in output_grads)
+
+        param_state = [param.detach().clone() for param in params]
+        optimizer_state = deepcopy(self.optimizer.state_dict())
+        was_training = self.model.training
+        search_view = torch.flip(x, dims=(-1,))
+
+        self.model.eval()
+        with torch.no_grad():
+            teacher_logits = _get_logits(self.model(x))
+            teacher_probs = (
+                teacher_logits / max(self.lambda_search_teacher_temp, 1e-6)
+            ).softmax(dim=1)
+            base_logits = _get_logits(self.model(search_view))
+            base_score = float(self._search_score(teacher_probs, base_logits).item())
+
+        candidates = sorted({
+            min(self.lambda_max, max(self.lambda_min, base_lambda - self.lambda_search_radius)),
+            min(self.lambda_max, max(self.lambda_min, base_lambda)),
+            min(self.lambda_max, max(self.lambda_min, base_lambda + self.lambda_search_radius)),
+        })
+        best_lambda = None
+        best_score = base_score
+
+        for candidate in candidates:
+            self._restore_search_state(params, param_state, optimizer_state)
+            self._set_weighted_grads(params, proto_grads, output_grads, candidate)
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+            self.model.eval()
+            with torch.no_grad():
+                candidate_logits = _get_logits(self.model(search_view))
+                score = float(self._search_score(teacher_probs, candidate_logits).item())
+            if score < best_score - self.lambda_search_min_improvement:
+                best_score = score
+                best_lambda = float(candidate)
+
+        self._restore_search_state(params, param_state, optimizer_state)
+        if was_training:
+            self.model.train()
+        else:
+            self.model.eval()
+
+        accepted = best_lambda is not None
+        if accepted:
+            self._set_weighted_grads(params, proto_grads, output_grads, best_lambda)
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+
+        return {
+            'accepted': accepted,
+            'selected_lambda': best_lambda,
+            'base_score': base_score,
+            'selected_score': best_score,
+        }
 
     def _consensus(self, similarities):
         """Aggregate over the spatial patches (dim=2)."""
@@ -675,13 +996,28 @@ def setup_proto_tta(model, lr=1e-3, steps=1, episodic=False,
                     sigmoid_center=2.0,
                     sigmoid_temp=1.0,
                     proto_weight=1.0,
-                    logit_weight=0.0):
+                    logit_weight=0.0,
+                    shared_confidence_weighting=False,
+                    gradient_normalize=False,
+                    adaptive_lambda=False,
+                    adaptive_lambda_strategy='relative_reliability',
+                    adaptive_delta0=0.25,
+                    adaptive_topk=3,
+                    lambda_ema_momentum=0.9,
+                    lambda_min=0.05,
+                    lambda_max=0.95,
+                    record_diagnostics=False,
+                    lambda_search=False,
+                    lambda_search_radius=0.1,
+                    lambda_search_teacher_temp=0.5,
+                    lambda_search_min_improvement=0.0,
+                    model_mode='train'):
     """Factory: configure + wrap model with ProtoTTA."""
-    model = configure_model(model, adaptation_mode)
+    model = configure_model(model, adaptation_mode, model_mode=model_mode)
     params, _ = collect_params(model, adaptation_mode)
     if not params:
         # Fallback to layernorm_only
-        model = configure_model(model, 'layernorm_only')
+        model = configure_model(model, 'layernorm_only', model_mode=model_mode)
         params, _ = collect_params(model, 'layernorm_only')
     optimizer = torch.optim.Adam(params, lr=lr, betas=(0.9, 0.999))
     return ProtoTTA(
@@ -704,4 +1040,18 @@ def setup_proto_tta(model, lr=1e-3, steps=1, episodic=False,
         sigmoid_temp=sigmoid_temp,
         proto_weight=proto_weight,
         logit_weight=logit_weight,
+        shared_confidence_weighting=shared_confidence_weighting,
+        gradient_normalize=gradient_normalize,
+        adaptive_lambda=adaptive_lambda,
+        adaptive_lambda_strategy=adaptive_lambda_strategy,
+        adaptive_delta0=adaptive_delta0,
+        adaptive_topk=adaptive_topk,
+        lambda_ema_momentum=lambda_ema_momentum,
+        lambda_min=lambda_min,
+        lambda_max=lambda_max,
+        record_diagnostics=record_diagnostics,
+        lambda_search=lambda_search,
+        lambda_search_radius=lambda_search_radius,
+        lambda_search_teacher_temp=lambda_search_teacher_temp,
+        lambda_search_min_improvement=lambda_search_min_improvement,
     )

@@ -207,15 +207,16 @@ def get_adapted_params_from_wrapper(model_wrapper):
         return model_wrapper, adapted_params
 
 
-def setup_proto_entropy(model, use_importance=False, use_confidence=False, 
-                        reset_mode=None, reset_frequency=10, 
+def setup_proto_entropy(model, use_importance=False, use_confidence=False,
+                        reset_mode=None, reset_frequency=10,
                         confidence_threshold=0.7, ema_alpha=0.999,
                         use_geometric_filter=False, geo_filter_threshold=0.3,
                         consensus_strategy='max', consensus_ratio=0.5,
                         adaptation_mode='layernorm_only',
                         use_ensemble_entropy=False,
                         source_proto_stats=None, alpha_source_kl=0.0,
-                        adapt_all_prototypes=False):
+                        adapt_all_prototypes=False,
+                        logit_weight=0.0):
     """Set up Prototype Entropy adaptation (without threshold).
     
     Args:
@@ -258,7 +259,8 @@ def setup_proto_entropy(model, use_importance=False, use_confidence=False,
         use_ensemble_entropy=use_ensemble_entropy,
         source_proto_stats=source_proto_stats,
         alpha_source_kl=alpha_source_kl,
-        adapt_all_prototypes=adapt_all_prototypes
+        adapt_all_prototypes=adapt_all_prototypes,
+        logit_weight=logit_weight,
     )
     return proto_model
 
@@ -718,7 +720,8 @@ def run_unified_inference(model_path, gpu_id='0', corruption=None, severity=1, m
                          interpretability_images=None, interpretability_num_images=0,
                          interpretability_mode='random',
                          use_prototype_metrics=False, proto_baseline_samples=None,
-                         track_efficiency=False, use_enhanced_metrics=False):
+                         track_efficiency=False, use_enhanced_metrics=False,
+                         proto_lambda=1.0):
     # Set GPU
     os.environ['CUDA_VISIBLE_DEVICES'] = gpu_id
     print(f'Using GPU: {os.environ["CUDA_VISIBLE_DEVICES"]}')
@@ -1075,12 +1078,13 @@ def run_unified_inference(model_path, gpu_id='0', corruption=None, severity=1, m
         proto_model = setup_proto_entropy(base_model, use_importance=False, use_confidence=False,
                                          reset_mode=reset_mode, reset_frequency=reset_frequency,
                                          confidence_threshold=confidence_threshold, ema_alpha=ema_alpha,
-                                         use_geometric_filter=use_geometric_filter, 
+                                         use_geometric_filter=use_geometric_filter,
                                          geo_filter_threshold=geo_filter_threshold,
                                          consensus_strategy=consensus_strategy, consensus_ratio=consensus_ratio,
                                          adaptation_mode=adaptation_mode,
                                          use_ensemble_entropy=use_ensemble_entropy,
-                                         source_proto_stats=source_proto_stats, alpha_source_kl=alpha_source_kl)
+                                         source_proto_stats=source_proto_stats, alpha_source_kl=alpha_source_kl,
+                                         logit_weight=1.0 - proto_lambda)
 
         if hasattr(proto_model, 'reset_geo_filter_stats'):
             proto_model.reset_geo_filter_stats()
@@ -1160,12 +1164,13 @@ def run_unified_inference(model_path, gpu_id='0', corruption=None, severity=1, m
         proto_model = setup_proto_entropy(base_model, use_importance=True, use_confidence=False,
                                          reset_mode=reset_mode, reset_frequency=reset_frequency,
                                          confidence_threshold=confidence_threshold, ema_alpha=ema_alpha,
-                                         use_geometric_filter=use_geometric_filter, 
+                                         use_geometric_filter=use_geometric_filter,
                                          geo_filter_threshold=geo_filter_threshold,
                                          consensus_strategy=consensus_strategy, consensus_ratio=consensus_ratio,
                                          adaptation_mode=adaptation_mode,
                                          use_ensemble_entropy=use_ensemble_entropy,
-                                         source_proto_stats=source_proto_stats, alpha_source_kl=alpha_source_kl)
+                                         source_proto_stats=source_proto_stats, alpha_source_kl=alpha_source_kl,
+                                         logit_weight=1.0 - proto_lambda)
 
         if hasattr(proto_model, 'reset_geo_filter_stats'):
             proto_model.reset_geo_filter_stats()
@@ -1245,12 +1250,13 @@ def run_unified_inference(model_path, gpu_id='0', corruption=None, severity=1, m
         proto_model = setup_proto_entropy(base_model, use_importance=False, use_confidence=True,
                                          reset_mode=reset_mode, reset_frequency=reset_frequency,
                                          confidence_threshold=confidence_threshold, ema_alpha=ema_alpha,
-                                         use_geometric_filter=use_geometric_filter, 
+                                         use_geometric_filter=use_geometric_filter,
                                          geo_filter_threshold=geo_filter_threshold,
                                          consensus_strategy=consensus_strategy, consensus_ratio=consensus_ratio,
                                          adaptation_mode=adaptation_mode,
                                          use_ensemble_entropy=use_ensemble_entropy,
-                                         source_proto_stats=source_proto_stats, alpha_source_kl=alpha_source_kl)
+                                         source_proto_stats=source_proto_stats, alpha_source_kl=alpha_source_kl,
+                                         logit_weight=1.0 - proto_lambda)
 
         if hasattr(proto_model, 'reset_geo_filter_stats'):
             proto_model.reset_geo_filter_stats()
@@ -1330,12 +1336,13 @@ def run_unified_inference(model_path, gpu_id='0', corruption=None, severity=1, m
         proto_model = setup_proto_entropy(base_model, use_importance=True, use_confidence=True,
                                          reset_mode=reset_mode, reset_frequency=reset_frequency,
                                          confidence_threshold=confidence_threshold, ema_alpha=ema_alpha,
-                                         use_geometric_filter=use_geometric_filter, 
+                                         use_geometric_filter=use_geometric_filter,
                                          geo_filter_threshold=geo_filter_threshold,
                                          consensus_strategy=consensus_strategy, consensus_ratio=consensus_ratio,
                                          adaptation_mode=adaptation_mode,
                                          use_ensemble_entropy=use_ensemble_entropy,
-                                         source_proto_stats=source_proto_stats, alpha_source_kl=alpha_source_kl)
+                                         source_proto_stats=source_proto_stats, alpha_source_kl=alpha_source_kl,
+                                         logit_weight=1.0 - proto_lambda)
 
         # Reset stats before evaluation
         if hasattr(proto_model, 'reset_geo_filter_stats'):
@@ -2230,7 +2237,16 @@ if __name__ == '__main__':
         action='store_false',
         help='Disable enhanced metrics (use this flag to turn off)'
     )
-    
+
+    parser.add_argument(
+        '--proto-lambda',
+        type=float,
+        default=1.0,
+        help='Unified ProtoTTA interpolation: 1.0 = pure prototype entropy (ProtoTTA), '
+             '0.0 = pure logit entropy (Tent-style), 0.7 = ProtoTTA+ default. '
+             'Loss = λ*proto_loss + (1-λ)*logit_entropy. (default: 1.0)'
+    )
+
     args = parser.parse_args()
     
     # Handle no-corruption flag
@@ -2244,14 +2260,15 @@ if __name__ == '__main__':
     # Determine whether to use pre-generated images (default: True, unless --on-the-fly is set)
     use_pre_generated = not args.on_the_fly
     
-    run_unified_inference(args.model, args.gpuid, corruption, args.severity, args.mode, 
+    run_unified_inference(args.model, args.gpuid, corruption, args.severity, args.mode,
                          use_pre_generated, args.use_clean_fisher, args.proto_threshold,
                          args.reset_mode, args.reset_frequency, args.confidence_threshold, args.ema_alpha,
                          args.use_geometric_filter, args.geo_filter_threshold, args.output_dir,
                          args.consensus_strategy, args.consensus_ratio, args.adaptation_mode,
-                         args.use_ensemble_entropy, args.use_source_stats, args.alpha_source_kl, 
+                         args.use_ensemble_entropy, args.use_source_stats, args.alpha_source_kl,
                          args.num_source_samples,
                          args.interpretability_images, args.interpretability_num_images,
                          args.interpretability_mode,
                          args.prototype_metrics, args.proto_baseline_samples,
-                         args.track_efficiency, args.use_enhanced_metrics)
+                         args.track_efficiency, args.use_enhanced_metrics,
+                         proto_lambda=args.proto_lambda)

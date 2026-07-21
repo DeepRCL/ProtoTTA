@@ -106,12 +106,18 @@ def collect_params(model):
     return params, names
 
 
-def configure_model(model):
+def configure_model(model, model_mode='train'):
     """Configure model for SAR, following the ProtoViT implementation."""
-    model.train()
+    if model_mode == 'train':
+        model.train()
+    elif model_mode == 'eval':
+        model.eval()
+    else:
+        raise ValueError(f"Unknown adaptation model mode: {model_mode}")
     model.requires_grad_(False)
     for m in model.modules():
         if isinstance(m, nn.BatchNorm2d):
+            m.train()
             m.requires_grad_(True)
             m.track_running_stats = False
             m.running_mean = None
@@ -220,6 +226,7 @@ def setup_sar(
     margin_e0=None,
     reset_constant_em=0.2,
     rho=0.05,
+    model_mode='train',
 ):
     """SAR with SAM.
 
@@ -227,7 +234,7 @@ def setup_sar(
     0.4*log(C), because the stricter threshold led to near-zero adaptation on
     Stanford Dogs-C.
     """
-    model = configure_model(model)
+    model = configure_model(model, model_mode=model_mode)
     params, _ = collect_params(model)
     nc = getattr(model, "num_classes", None)
     if margin_e0 is None:

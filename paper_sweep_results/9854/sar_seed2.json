@@ -1,0 +1,220 @@
+{
+  "timestamp": "2026-07-20T17:28:26.817414",
+  "metadata": {
+    "model": "/home/mahdi.abootorabi/protovit/ProtoPFormer/output_cosine/Dogs/deit_small_patch16_224/1028-adamw-0.05-200-protopformer/checkpoints/epoch-best.pth",
+    "severity": 5,
+    "modes": [
+      "sar"
+    ],
+    "corruptions": [
+      "gaussian_noise",
+      "shot_noise",
+      "impulse_noise",
+      "speckle_noise",
+      "gaussian_blur",
+      "defocus_blur",
+      "fog",
+      "frost",
+      "brightness",
+      "jpeg_compression",
+      "contrast",
+      "pixelate",
+      "elastic_transform"
+    ],
+    "track_efficiency": false,
+    "use_enhanced_metrics": false,
+    "prototype_metrics": false,
+    "run_config": {
+      "model": "/home/mahdi.abootorabi/protovit/ProtoPFormer/output_cosine/Dogs/deit_small_patch16_224/1028-adamw-0.05-200-protopformer/checkpoints/epoch-best.pth",
+      "data_dir": "/home/mahdi.abootorabi/protovit/ProtoPFormer/datasets/stanford_dogs_c",
+      "clean_dir": "/home/mahdi.abootorabi/protovit/ProtoPFormer/datasets/stanford_dogs/Images",
+      "on_the_fly": false,
+      "batch_size": 128,
+      "seed": 2,
+      "adapt_model_mode": "train",
+      "num_workers": 4,
+      "severity": 5,
+      "modes": [
+        "sar"
+      ],
+      "corruptions": [
+        "gaussian_noise",
+        "shot_noise",
+        "impulse_noise",
+        "speckle_noise",
+        "gaussian_blur",
+        "defocus_blur",
+        "fog",
+        "frost",
+        "brightness",
+        "jpeg_compression",
+        "contrast",
+        "pixelate",
+        "elastic_transform"
+      ],
+      "lr": 0.001,
+      "steps": 1,
+      "use_global_fisher": false,
+      "sar_lr": 0.0001,
+      "sar_margin": 2.8724950456692273,
+      "sar_reset": 0.2,
+      "sar_rho": 0.05,
+      "proto_threshold": 0.62,
+      "proto_mapping": "sigmoid",
+      "proto_sigmoid_center": 1.0,
+      "proto_sigmoid_temp": 1.0,
+      "proto_branch": "both",
+      "proto_use_importance": true,
+      "proto_branch_agreement": false,
+      "proto_all_prototypes": false,
+      "proto_lambda": 1.0,
+      "proto_shared_confidence_weighting": false,
+      "proto_gradient_normalize": false,
+      "proto_lambda_ema_momentum": 0.9,
+      "proto_adaptive_strategy": "relative_reliability",
+      "proto_adaptive_delta0": 0.25,
+      "proto_adaptive_topk": 3,
+      "proto_lambda_min": 0.05,
+      "proto_lambda_max": 0.95,
+      "proto_record_diagnostics": false,
+      "prototype_metrics": false,
+      "proto_baseline_samples": 1000,
+      "use_enhanced_metrics": false,
+      "track_efficiency": false
+    }
+  },
+  "results": {
+    "sar": {
+      "gaussian_noise": {
+        "5": {
+          "accuracy": 0.36538461538461536,
+          "adaptation_stats": {
+            "total_samples": 8580,
+            "adapted_samples": 26,
+            "total_updates": 26
+          }
+        }
+      },
+      "shot_noise": {
+        "5": {
+          "accuracy": 0.33403263403263406,
+          "adaptation_stats": {
+            "total_samples": 8580,
+            "adapted_samples": 33,
+            "total_updates": 33
+          }
+        }
+      },
+      "impulse_noise": {
+        "5": {
+          "accuracy": 0.3641025641025641,
+          "adaptation_stats": {
+            "total_samples": 8580,
+            "adapted_samples": 33,
+            "total_updates": 33
+          }
+        }
+      },
+      "speckle_noise": {
+        "5": {
+          "accuracy": 0.35104895104895106,
+          "adaptation_stats": {
+            "total_samples": 8580,
+            "adapted_samples": 66,
+            "total_updates": 66
+          }
+        }
+      },
+      "gaussian_blur": {
+        "5": {
+          "accuracy": 0.2766899766899767,
+          "adaptation_stats": {
+            "total_samples": 8580,
+            "adapted_samples": 7,
+            "total_updates": 7
+          }
+        }
+      },
+      "defocus_blur": {
+        "5": {
+          "accuracy": 0.2966200466200466,
+          "adaptation_stats": {
+            "total_samples": 8580,
+            "adapted_samples": 6,
+            "total_updates": 6
+          }
+        }
+      },
+      "fog": {
+        "5": {
+          "accuracy": 0.317016317016317,
+          "adaptation_stats": {
+            "total_samples": 8580,
+            "adapted_samples": 47,
+            "total_updates": 47
+          }
+        }
+      },
+      "frost": {
+        "5": {
+          "accuracy": 0.38414918414918414,
+          "adaptation_stats": {
+            "total_samples": 8580,
+            "adapted_samples": 16,
+            "total_updates": 16
+          }
+        }
+      },
+      "brightness": {
+        "5": {
+          "accuracy": 0.6008158508158508,
+          "adaptation_stats": {
+            "total_samples": 8580,
+            "adapted_samples": 84,
+            "total_updates": 84
+          }
+        }
+      },
+      "jpeg_compression": {
+        "5": {
+          "accuracy": 0.5919580419580419,
+          "adaptation_stats": {
+            "total_samples": 8580,
+            "adapted_samples": 88,
+            "total_updates": 88
+          }
+        }
+      },
+      "contrast": {
+        "5": {
+          "accuracy": 0.3441724941724942,
+          "adaptation_stats": {
+            "total_samples": 8580,
+            "adapted_samples": 204,
+            "total_updates": 204
+          }
+        }
+      },
+      "pixelate": {
+        "5": {
+          "accuracy": 0.6247086247086248,
+          "adaptation_stats": {
+            "total_samples": 8580,
+            "adapted_samples": 129,
+            "total_updates": 129
+          }
+        }
+      },
+      "elastic_transform": {
+        "5": {
+          "accuracy": 0.5034965034965035,
+          "adaptation_stats": {
+            "total_samples": 8580,
+            "adapted_samples": 18,
+            "total_updates": 18
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,293 @@
+{
+  "timestamp": "2026-07-20T13:10:45.563463",
+  "metadata": {
+    "model_path": "/home/mahdi.abootorabi/protovit/ProtoViT/saved_models/deit_small_patch16_224/exp1/14finetuned0.8609.pth",
+    "data_dir": "/home/mahdi.abootorabi/protovit/ProtoViT/datasets/cub200_c",
+    "clean_data_dir": "./datasets/cub200_cropped/test_cropped/",
+    "on_the_fly": false,
+    "batch_size": 128,
+    "severity": 5,
+    "corruption_types": [
+      "gaussian_noise",
+      "fog",
+      "gaussian_blur",
+      "elastic_transform",
+      "brightness",
+      "jpeg_compression",
+      "contrast",
+      "defocus_blur",
+      "frost",
+      "impulse_noise",
+      "pixelate",
+      "shot_noise",
+      "speckle_noise"
+    ],
+    "modes": [
+      "proto_imp_conf_v3"
+    ],
+    "mode_configs": {
+      "proto_imp_conf_v3": {
+        "use_geometric_filter": true,
+        "geo_filter_threshold": 0.92,
+        "consensus_strategy": "top_k_mean",
+        "adaptation_mode": "layernorm_attn_bias",
+        "use_ensemble_entropy": false,
+        "reset_mode": null,
+        "reset_frequency": 10,
+        "confidence_threshold": 0.7,
+        "ema_alpha": 0.999,
+        "consensus_ratio": 0.5,
+        "shared_confidence_weighting": false,
+        "gradient_normalize": false,
+        "lambda_ema_momentum": 0.9,
+        "adaptive_lambda_strategy": "relative_reliability",
+        "adaptive_delta0": 0.25,
+        "adaptive_topk": 3,
+        "lambda_min": 0.05,
+        "lambda_max": 0.95,
+        "record_diagnostics": false,
+        "logit_weight": 0.0
+      }
+    },
+    "prototype_metrics_enabled": false,
+    "proto_baseline_samples": null
+  },
+  "results": {
+    "proto_imp_conf_v3": {
+      "gaussian_noise": {
+        "5": {
+          "accuracy": 0.5205384880911288,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 2477,
+            "total_updates": 2477,
+            "proto_loss": [],
+            "output_loss": [],
+            "proto_grad_norm": [],
+            "output_grad_norm": [],
+            "adaptive_lambda": [],
+            "adaptive_lambda_raw": [],
+            "proto_signal_reliability": [],
+            "output_signal_reliability": []
+          }
+        }
+      },
+      "fog": {
+        "5": {
+          "accuracy": 0.700724887814981,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 3766,
+            "total_updates": 3766,
+            "proto_loss": [],
+            "output_loss": [],
+            "proto_grad_norm": [],
+            "output_grad_norm": [],
+            "adaptive_lambda": [],
+            "adaptive_lambda_raw": [],
+            "proto_signal_reliability": [],
+            "output_signal_reliability": []
+          }
+        }
+      },
+      "gaussian_blur": {
+        "5": {
+          "accuracy": 0.42889195719710044,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 2356,
+            "total_updates": 2356,
+            "proto_loss": [],
+            "output_loss": [],
+            "proto_grad_norm": [],
+            "output_grad_norm": [],
+            "adaptive_lambda": [],
+            "adaptive_lambda_raw": [],
+            "proto_signal_reliability": [],
+            "output_signal_reliability": []
+          }
+        }
+      },
+      "elastic_transform": {
+        "5": {
+          "accuracy": 0.7502588885053504,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 4191,
+            "total_updates": 4191,
+            "proto_loss": [],
+            "output_loss": [],
+            "proto_grad_norm": [],
+            "output_grad_norm": [],
+            "adaptive_lambda": [],
+            "adaptive_lambda_raw": [],
+            "proto_signal_reliability": [],
+            "output_signal_reliability": []
+          }
+        }
+      },
+      "brightness": {
+        "5": {
+          "accuracy": 0.7376596479116327,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 4117,
+            "total_updates": 4117,
+            "proto_loss": [],
+            "output_loss": [],
+            "proto_grad_norm": [],
+            "output_grad_norm": [],
+            "adaptive_lambda": [],
+            "adaptive_lambda_raw": [],
+            "proto_signal_reliability": [],
+            "output_signal_reliability": []
+          }
+        }
+      },
+      "jpeg_compression": {
+        "5": {
+          "accuracy": 0.6822575077666552,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 3894,
+            "total_updates": 3894,
+            "proto_loss": [],
+            "output_loss": [],
+            "proto_grad_norm": [],
+            "output_grad_norm": [],
+            "adaptive_lambda": [],
+            "adaptive_lambda_raw": [],
+            "proto_signal_reliability": [],
+            "output_signal_reliability": []
+          }
+        }
+      },
+      "contrast": {
+        "5": {
+          "accuracy": 0.5631687953054885,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 2857,
+            "total_updates": 2857,
+            "proto_loss": [],
+            "output_loss": [],
+            "proto_grad_norm": [],
+            "output_grad_norm": [],
+            "adaptive_lambda": [],
+            "adaptive_lambda_raw": [],
+            "proto_signal_reliability": [],
+            "output_signal_reliability": []
+          }
+        }
+      },
+      "defocus_blur": {
+        "5": {
+          "accuracy": 0.4653089402830514,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 2538,
+            "total_updates": 2538,
+            "proto_loss": [],
+            "output_loss": [],
+            "proto_grad_norm": [],
+            "output_grad_norm": [],
+            "adaptive_lambda": [],
+            "adaptive_lambda_raw": [],
+            "proto_signal_reliability": [],
+            "output_signal_reliability": []
+          }
+        }
+      },
+      "frost": {
+        "5": {
+          "accuracy": 0.530031066620642,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 2520,
+            "total_updates": 2520,
+            "proto_loss": [],
+            "output_loss": [],
+            "proto_grad_norm": [],
+            "output_grad_norm": [],
+            "adaptive_lambda": [],
+            "adaptive_lambda_raw": [],
+            "proto_signal_reliability": [],
+            "output_signal_reliability": []
+          }
+        }
+      },
+      "impulse_noise": {
+        "5": {
+          "accuracy": 0.5369347600966518,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 2589,
+            "total_updates": 2589,
+            "proto_loss": [],
+            "output_loss": [],
+            "proto_grad_norm": [],
+            "output_grad_norm": [],
+            "adaptive_lambda": [],
+            "adaptive_lambda_raw": [],
+            "proto_signal_reliability": [],
+            "output_signal_reliability": []
+          }
+        }
+      },
+      "pixelate": {
+        "5": {
+          "accuracy": 0.7226441146013117,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 3999,
+            "total_updates": 3999,
+            "proto_loss": [],
+            "output_loss": [],
+            "proto_grad_norm": [],
+            "output_grad_norm": [],
+            "adaptive_lambda": [],
+            "adaptive_lambda_raw": [],
+            "proto_signal_reliability": [],
+            "output_signal_reliability": []
+          }
+        }
+      },
+      "shot_noise": {
+        "5": {
+          "accuracy": 0.5253710735243355,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 2560,
+            "total_updates": 2560,
+            "proto_loss": [],
+            "output_loss": [],
+            "proto_grad_norm": [],
+            "output_grad_norm": [],
+            "adaptive_lambda": [],
+            "adaptive_lambda_raw": [],
+            "proto_signal_reliability": [],
+            "output_signal_reliability": []
+          }
+        }
+      },
+      "speckle_noise": {
+        "5": {
+          "accuracy": 0.6494649637556092,
+          "adaptation_stats": {
+            "total_samples": 5794,
+            "adapted_samples": 3377,
+            "total_updates": 3377,
+            "proto_loss": [],
+            "output_loss": [],
+            "proto_grad_norm": [],
+            "output_grad_norm": [],
+            "adaptive_lambda": [],
+            "adaptive_lambda_raw": [],
+            "proto_signal_reliability": [],
+            "output_signal_reliability": []
+          }
+        }
+      }
+    }
+  }
+}

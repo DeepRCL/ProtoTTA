@@ -121,13 +121,13 @@ def load_model_and_optimizer(model, optimizer, model_state, optimizer_state):
 
 def configure_model(model):
     """Configure model for use with tent."""
-    # train mode, because tent optimizes the model to minimize entropy
-    model.train()
+    model.eval()
     # disable grad, to (re-)enable only what tent updates
     model.requires_grad_(False)
     # configure norm for tent updates: enable grad + force batch statisics
     for m in model.modules():
         if isinstance(m, nn.BatchNorm2d):
+            m.train()
             m.requires_grad_(True)
             # force use of batch stats in train and eval modes
             m.track_running_stats = False
@@ -141,7 +141,8 @@ def configure_model(model):
 def check_model(model):
     """Check model for compatability with tent."""
     is_training = model.training
-    assert is_training, "tent needs train mode: call model.train()"
+    # Eval mode is intentional for transformers: gradients remain enabled and
+    # stochastic depth/dropout must stay disabled.
     param_grads = [p.requires_grad for p in model.parameters()]
     has_any_params = any(param_grads)
     has_all_params = all(param_grads)

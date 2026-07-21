@@ -1,0 +1,221 @@
+model,dataset,lambda,corruption,accuracy
+ProtoLens,Amazon-C,0.0,aggressive,50.175
+ProtoLens,Amazon-C,0.3,aggressive,50.175
+ProtoLens,Amazon-C,0.5,aggressive,50.175
+ProtoLens,Amazon-C,0.7,aggressive,50.175
+ProtoLens,Amazon-C,1.0,aggressive,50.175
+ProtoLens,Amazon-C,0.0,mixed,50.2375
+ProtoLens,Amazon-C,0.3,mixed,50.2375
+ProtoLens,Amazon-C,0.5,mixed,50.2375
+ProtoLens,Amazon-C,0.7,mixed,50.2375
+ProtoLens,Amazon-C,1.0,mixed,50.2375
+ProtoLens,Amazon-C,0.0,qwerty,50.28125
+ProtoLens,Amazon-C,0.3,qwerty,50.28125
+ProtoLens,Amazon-C,0.5,qwerty,50.28125
+ProtoLens,Amazon-C,0.7,qwerty,50.28125
+ProtoLens,Amazon-C,1.0,qwerty,50.28125
+ProtoLens,Amazon-C,0.0,remove_char,50.275
+ProtoLens,Amazon-C,0.3,remove_char,50.275
+ProtoLens,Amazon-C,0.5,remove_char,50.275
+ProtoLens,Amazon-C,0.7,remove_char,50.275
+ProtoLens,Amazon-C,1.0,remove_char,50.275
+ProtoLens,Amazon-C,0.0,swap,50.224999999999994
+ProtoLens,Amazon-C,0.3,swap,50.224999999999994
+ProtoLens,Amazon-C,0.5,swap,50.224999999999994
+ProtoLens,Amazon-C,0.7,swap,50.224999999999994
+ProtoLens,Amazon-C,1.0,swap,50.224999999999994
+ProtoPFormer,Stanford Dogs-C,0.0,brightness,67.76223776223776
+ProtoPFormer,Stanford Dogs-C,0.3,brightness,67.26107226107226
+ProtoPFormer,Stanford Dogs-C,0.5,brightness,66.86480186480186
+ProtoPFormer,Stanford Dogs-C,0.7,brightness,67.01631701631702
+ProtoPFormer,Stanford Dogs-C,1.0,brightness,65.78088578088578
+ProtoPFormer,Stanford Dogs-C,0.0,contrast,46.282051282051285
+ProtoPFormer,Stanford Dogs-C,0.3,contrast,47.93706293706293
+ProtoPFormer,Stanford Dogs-C,0.5,contrast,46.84149184149184
+ProtoPFormer,Stanford Dogs-C,0.7,contrast,46.666666666666664
+ProtoPFormer,Stanford Dogs-C,1.0,contrast,46.88811188811189
+ProtoPFormer,Stanford Dogs-C,0.0,defocus_blur,46.44522144522145
+ProtoPFormer,Stanford Dogs-C,0.3,defocus_blur,46.55011655011655
+ProtoPFormer,Stanford Dogs-C,0.5,defocus_blur,47.05128205128205
+ProtoPFormer,Stanford Dogs-C,0.7,defocus_blur,47.51748251748252
+ProtoPFormer,Stanford Dogs-C,1.0,defocus_blur,45.46620046620047
+ProtoPFormer,Stanford Dogs-C,0.0,elastic_transform,66.16550116550115
+ProtoPFormer,Stanford Dogs-C,0.3,elastic_transform,65.54778554778555
+ProtoPFormer,Stanford Dogs-C,0.5,elastic_transform,65.12820512820512
+ProtoPFormer,Stanford Dogs-C,0.7,elastic_transform,65.29137529137529
+ProtoPFormer,Stanford Dogs-C,1.0,elastic_transform,63.84615384615384
+ProtoPFormer,Stanford Dogs-C,0.0,fog,61.85314685314685
+ProtoPFormer,Stanford Dogs-C,0.3,fog,62.17948717948718
+ProtoPFormer,Stanford Dogs-C,0.5,fog,61.34032634032634
+ProtoPFormer,Stanford Dogs-C,0.7,fog,60.95571095571095
+ProtoPFormer,Stanford Dogs-C,1.0,fog,59.14918414918415
+ProtoPFormer,Stanford Dogs-C,0.0,frost,54.26573426573427
+ProtoPFormer,Stanford Dogs-C,0.3,frost,54.73193473193473
+ProtoPFormer,Stanford Dogs-C,0.5,frost,54.65034965034965
+ProtoPFormer,Stanford Dogs-C,0.7,frost,54.20745920745921
+ProtoPFormer,Stanford Dogs-C,1.0,frost,53.58974358974359
+ProtoPFormer,Stanford Dogs-C,0.0,gaussian_blur,40.687645687645684
+ProtoPFormer,Stanford Dogs-C,0.3,gaussian_blur,40.18648018648019
+ProtoPFormer,Stanford Dogs-C,0.5,gaussian_blur,40.73426573426573
+ProtoPFormer,Stanford Dogs-C,0.7,gaussian_blur,41.095571095571096
+ProtoPFormer,Stanford Dogs-C,1.0,gaussian_blur,36.01398601398601
+ProtoPFormer,Stanford Dogs-C,0.0,gaussian_noise,52.26107226107226
+ProtoPFormer,Stanford Dogs-C,0.3,gaussian_noise,51.58508158508158
+ProtoPFormer,Stanford Dogs-C,0.5,gaussian_noise,51.24708624708625
+ProtoPFormer,Stanford Dogs-C,0.7,gaussian_noise,52.226107226107224
+ProtoPFormer,Stanford Dogs-C,1.0,gaussian_noise,50.87412587412587
+ProtoPFormer,Stanford Dogs-C,0.0,impulse_noise,52.24941724941725
+ProtoPFormer,Stanford Dogs-C,0.3,impulse_noise,53.36829836829837
+ProtoPFormer,Stanford Dogs-C,0.5,impulse_noise,52.17948717948718
+ProtoPFormer,Stanford Dogs-C,0.7,impulse_noise,53.25174825174825
+ProtoPFormer,Stanford Dogs-C,1.0,impulse_noise,51.66666666666667
+ProtoPFormer,Stanford Dogs-C,0.0,jpeg_compression,66.4918414918415
+ProtoPFormer,Stanford Dogs-C,0.3,jpeg_compression,66.36363636363637
+ProtoPFormer,Stanford Dogs-C,0.5,jpeg_compression,66.37529137529138
+ProtoPFormer,Stanford Dogs-C,0.7,jpeg_compression,66.84149184149184
+ProtoPFormer,Stanford Dogs-C,1.0,jpeg_compression,64.1025641025641
+ProtoPFormer,Stanford Dogs-C,0.0,pixelate,69.83682983682984
+ProtoPFormer,Stanford Dogs-C,0.3,pixelate,69.93006993006993
+ProtoPFormer,Stanford Dogs-C,0.5,pixelate,69.52214452214453
+ProtoPFormer,Stanford Dogs-C,0.7,pixelate,69.12587412587412
+ProtoPFormer,Stanford Dogs-C,1.0,pixelate,66.78321678321679
+ProtoPFormer,Stanford Dogs-C,0.0,shot_noise,53.333333333333336
+ProtoPFormer,Stanford Dogs-C,0.3,shot_noise,53.31002331002331
+ProtoPFormer,Stanford Dogs-C,0.5,shot_noise,53.22843822843822
+ProtoPFormer,Stanford Dogs-C,0.7,shot_noise,53.671328671328666
+ProtoPFormer,Stanford Dogs-C,1.0,shot_noise,51.99300699300699
+ProtoPFormer,Stanford Dogs-C,0.0,speckle_noise,61.91142191142192
+ProtoPFormer,Stanford Dogs-C,0.3,speckle_noise,62.004662004662
+ProtoPFormer,Stanford Dogs-C,0.5,speckle_noise,62.843822843822835
+ProtoPFormer,Stanford Dogs-C,0.7,speckle_noise,61.934731934731936
+ProtoPFormer,Stanford Dogs-C,1.0,speckle_noise,60.24475524475525
+ProtoSViT,Stanford Cars-C,0.0,brightness,93.17249059677124
+ProtoSViT,Stanford Cars-C,0.3,brightness,93.17249059677124
+ProtoSViT,Stanford Cars-C,0.5,brightness,93.18493008613586
+ProtoSViT,Stanford Cars-C,0.7,brightness,93.19736361503601
+ProtoSViT,Stanford Cars-C,1.0,brightness,92.53824353218079
+ProtoSViT,Stanford Cars-C,0.0,contrast,92.78696775436401
+ProtoSViT,Stanford Cars-C,0.3,contrast,92.77452826499939
+ProtoSViT,Stanford Cars-C,0.5,contrast,92.78696775436401
+ProtoSViT,Stanford Cars-C,0.7,contrast,92.79940128326416
+ProtoSViT,Stanford Cars-C,1.0,contrast,91.59308671951294
+ProtoSViT,Stanford Cars-C,0.0,defocus_blur,82.78821110725403
+ProtoSViT,Stanford Cars-C,0.3,defocus_blur,82.86283016204834
+ProtoSViT,Stanford Cars-C,0.5,defocus_blur,82.75090456008911
+ProtoSViT,Stanford Cars-C,0.7,defocus_blur,82.75090456008911
+ProtoSViT,Stanford Cars-C,1.0,defocus_blur,80.61186671257019
+ProtoSViT,Stanford Cars-C,0.0,elastic_transform,83.13642740249634
+ProtoSViT,Stanford Cars-C,0.3,elastic_transform,83.09911489486694
+ProtoSViT,Stanford Cars-C,0.5,elastic_transform,83.07424187660217
+ProtoSViT,Stanford Cars-C,0.7,elastic_transform,83.11155438423157
+ProtoSViT,Stanford Cars-C,1.0,elastic_transform,80.17659783363342
+ProtoSViT,Stanford Cars-C,0.0,fog,93.34659576416016
+ProtoSViT,Stanford Cars-C,0.3,fog,93.34659576416016
+ProtoSViT,Stanford Cars-C,0.5,fog,93.3963418006897
+ProtoSViT,Stanford Cars-C,0.7,fog,93.37146878242493
+ProtoSViT,Stanford Cars-C,1.0,fog,92.63772964477539
+ProtoSViT,Stanford Cars-C,0.0,frost,89.9266242980957
+ProtoSViT,Stanford Cars-C,0.3,frost,89.88931775093079
+ProtoSViT,Stanford Cars-C,0.5,frost,89.83957171440125
+ProtoSViT,Stanford Cars-C,0.7,frost,89.86444473266602
+ProtoSViT,Stanford Cars-C,1.0,frost,88.47158551216125
+ProtoSViT,Stanford Cars-C,0.0,gaussian_blur,80.7859718799591
+ProtoSViT,Stanford Cars-C,0.3,gaussian_blur,81.03469610214233
+ProtoSViT,Stanford Cars-C,0.5,gaussian_blur,80.82327842712402
+ProtoSViT,Stanford Cars-C,0.7,gaussian_blur,81.10931515693665
+ProtoSViT,Stanford Cars-C,1.0,gaussian_blur,78.42308282852173
+ProtoSViT,Stanford Cars-C,0.0,gaussian_noise,89.77739214897156
+ProtoSViT,Stanford Cars-C,0.3,gaussian_noise,89.80226516723633
+ProtoSViT,Stanford Cars-C,0.5,gaussian_noise,89.70277309417725
+ProtoSViT,Stanford Cars-C,0.7,gaussian_noise,89.71520662307739
+ProtoSViT,Stanford Cars-C,1.0,gaussian_noise,88.09849619865417
+ProtoSViT,Stanford Cars-C,0.0,impulse_noise,89.3048107624054
+ProtoSViT,Stanford Cars-C,0.3,impulse_noise,89.35455679893494
+ProtoSViT,Stanford Cars-C,0.5,impulse_noise,89.35455679893494
+ProtoSViT,Stanford Cars-C,0.7,impulse_noise,89.29237723350525
+ProtoSViT,Stanford Cars-C,1.0,impulse_noise,87.66322731971741
+ProtoSViT,Stanford Cars-C,0.0,jpeg_compression,92.47605800628662
+ProtoSViT,Stanford Cars-C,0.3,jpeg_compression,92.48849749565125
+ProtoSViT,Stanford Cars-C,0.5,jpeg_compression,92.52580404281616
+ProtoSViT,Stanford Cars-C,0.7,jpeg_compression,92.46362447738647
+ProtoSViT,Stanford Cars-C,1.0,jpeg_compression,91.76719188690186
+ProtoSViT,Stanford Cars-C,0.0,pixelate,91.5433406829834
+ProtoSViT,Stanford Cars-C,0.3,pixelate,91.5433406829834
+ProtoSViT,Stanford Cars-C,0.5,pixelate,91.58064723014832
+ProtoSViT,Stanford Cars-C,0.7,pixelate,91.56821370124817
+ProtoSViT,Stanford Cars-C,1.0,pixelate,90.63549041748047
+ProtoSViT,Stanford Cars-C,0.0,shot_noise,90.00124335289001
+ProtoSViT,Stanford Cars-C,0.3,shot_noise,89.97637033462524
+ProtoSViT,Stanford Cars-C,0.5,shot_noise,90.0634229183197
+ProtoSViT,Stanford Cars-C,0.7,shot_noise,90.03854990005493
+ProtoSViT,Stanford Cars-C,1.0,shot_noise,88.7576162815094
+ProtoSViT,Stanford Cars-C,0.0,speckle_noise,91.232430934906
+ProtoSViT,Stanford Cars-C,0.3,speckle_noise,91.29461646080017
+ProtoSViT,Stanford Cars-C,0.5,speckle_noise,91.21999740600586
+ProtoSViT,Stanford Cars-C,0.7,speckle_noise,91.14537835121155
+ProtoSViT,Stanford Cars-C,1.0,speckle_noise,90.4489517211914
+ProtoViT,CUB-200-C,0.0,brightness,75.97514670348636
+ProtoViT,CUB-200-C,0.3,brightness,75.716258198136
+ProtoViT,CUB-200-C,0.5,brightness,75.99240593717639
+ProtoViT,CUB-200-C,0.7,brightness,76.40662754573697
+ProtoViT,CUB-200-C,1.0,brightness,79.09906800138073
+ProtoViT,CUB-200-C,0.0,contrast,45.012081463583016
+ProtoViT,CUB-200-C,0.3,contrast,51.1391094235416
+ProtoViT,CUB-200-C,0.5,contrast,53.84880911287539
+ProtoViT,CUB-200-C,0.7,contrast,55.45391784604764
+ProtoViT,CUB-200-C,1.0,contrast,63.134276838108384
+ProtoViT,CUB-200-C,0.0,defocus_blur,27.64929237141871
+ProtoViT,CUB-200-C,0.3,defocus_blur,34.967207455988955
+ProtoViT,CUB-200-C,0.5,defocus_blur,29.4269934414912
+ProtoViT,CUB-200-C,0.7,defocus_blur,40.283051432516395
+ProtoViT,CUB-200-C,1.0,defocus_blur,51.19088712461167
+ProtoViT,CUB-200-C,0.0,elastic_transform,75.0604073179151
+ProtoViT,CUB-200-C,0.3,elastic_transform,75.68173973075596
+ProtoViT,CUB-200-C,0.5,elastic_transform,76.11322057300656
+ProtoViT,CUB-200-C,0.7,elastic_transform,76.00966517086641
+ProtoViT,CUB-200-C,1.0,elastic_transform,79.91025198481188
+ProtoViT,CUB-200-C,0.0,fog,71.86744908526062
+ProtoViT,CUB-200-C,0.3,fog,70.91819123230928
+ProtoViT,CUB-200-C,0.5,fog,72.6441146013117
+ProtoViT,CUB-200-C,0.7,fog,73.36900241629272
+ProtoViT,CUB-200-C,1.0,fog,76.78633068691751
+ProtoViT,CUB-200-C,0.0,frost,53.12392129789437
+ProtoViT,CUB-200-C,0.3,frost,54.6427338626165
+ProtoViT,CUB-200-C,0.5,frost,27.959958577839146
+ProtoViT,CUB-200-C,0.7,frost,55.902657921988265
+ProtoViT,CUB-200-C,1.0,frost,63.06523990334829
+ProtoViT,CUB-200-C,0.0,gaussian_blur,27.027959958577842
+ProtoViT,CUB-200-C,0.3,gaussian_blur,36.90024162927166
+ProtoViT,CUB-200-C,0.5,gaussian_blur,39.212978943734896
+ProtoViT,CUB-200-C,0.7,gaussian_blur,39.43734898170521
+ProtoViT,CUB-200-C,1.0,gaussian_blur,47.9288919571971
+ProtoViT,CUB-200-C,0.0,gaussian_noise,48.619261304798066
+ProtoViT,CUB-200-C,0.3,gaussian_noise,38.781498101484296
+ProtoViT,CUB-200-C,0.5,gaussian_noise,51.74318260269244
+ProtoViT,CUB-200-C,0.7,gaussian_noise,43.303417328270626
+ProtoViT,CUB-200-C,1.0,gaussian_noise,59.76872626855367
+ProtoViT,CUB-200-C,0.0,impulse_noise,34.276838108387985
+ProtoViT,CUB-200-C,0.3,impulse_noise,30.963065239903347
+ProtoViT,CUB-200-C,0.5,impulse_noise,35.001725923369
+ProtoViT,CUB-200-C,0.7,impulse_noise,31.463583016914047
+ProtoViT,CUB-200-C,1.0,impulse_noise,62.34035208836728
+ProtoViT,CUB-200-C,0.0,jpeg_compression,69.15774939592683
+ProtoViT,CUB-200-C,0.3,jpeg_compression,68.65723161891611
+ProtoViT,CUB-200-C,0.5,jpeg_compression,69.76182257507767
+ProtoViT,CUB-200-C,0.7,jpeg_compression,70.0724887814981
+ProtoViT,CUB-200-C,1.0,jpeg_compression,72.97204004142216
+ProtoViT,CUB-200-C,0.0,pixelate,73.73144632378322
+ProtoViT,CUB-200-C,0.3,pixelate,73.85226095961339
+ProtoViT,CUB-200-C,0.5,pixelate,73.97307559544356
+ProtoViT,CUB-200-C,0.7,pixelate,74.11114946496376
+ProtoViT,CUB-200-C,1.0,pixelate,77.28684846392821
+ProtoViT,CUB-200-C,0.0,shot_noise,53.55540214014498
+ProtoViT,CUB-200-C,0.3,shot_noise,53.693476009665176
+ProtoViT,CUB-200-C,0.5,shot_noise,54.02140144977563
+ProtoViT,CUB-200-C,0.7,shot_noise,53.52088367276493
+ProtoViT,CUB-200-C,1.0,shot_noise,61.649982740766305
+ProtoViT,CUB-200-C,0.0,speckle_noise,66.32723507076285
+ProtoViT,CUB-200-C,0.3,speckle_noise,58.95754228512254
+ProtoViT,CUB-200-C,0.5,speckle_noise,65.75768035899206
+ProtoViT,CUB-200-C,0.7,speckle_noise,67.24197445633415
+ProtoViT,CUB-200-C,1.0,speckle_noise,71.26337590610977

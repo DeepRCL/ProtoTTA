@@ -222,12 +222,12 @@ def main():
                         help='Require global/local branch agreement before adaptation')
     parser.add_argument('--proto_branch', type=str, default='both', choices=['local', 'global', 'both'],
                         help='Which prototype branch to use for ProtoTTA')
-    parser.add_argument('--proto_plus', action='store_true',
-                        help='Use ProtoTTA+ hybrid loss: prototype loss + logit entropy')
-    parser.add_argument('--proto_weight', type=float, default=0.7,
-                        help='Weight of prototype-aware loss in ProtoTTA+')
-    parser.add_argument('--logit_weight', type=float, default=0.3,
-                        help='Weight of logit entropy loss in ProtoTTA+')
+    parser.add_argument('--proto_lambda', type=float, default=1.0,
+                        help='Unified ProtoTTA interpolation λ ∈ [0,1]: '
+                             '1.0 = pure prototype entropy (ProtoTTA), '
+                             '0.0 = pure logit entropy (Tent-style), '
+                             '0.7 = ProtoTTA+ default. '
+                             'Loss = λ*proto_loss + (1-λ)*logit_entropy.')
     parser.add_argument('--proto_no_importance', action='store_true',
                         help='Disable prototype importance weighting in ProtoTTA')
     parser.add_argument('--proto_all_prototypes', action='store_true',
@@ -292,8 +292,8 @@ def main():
                 similarity_mapping=args.proto_mapping,
                 sigmoid_center=args.proto_sigmoid_center,
                 sigmoid_temp=args.proto_sigmoid_temp,
-                proto_weight=args.proto_weight if args.proto_plus else 1.0,
-                logit_weight=args.logit_weight if args.proto_plus else 0.0,
+                proto_weight=args.proto_lambda,
+                logit_weight=1.0 - args.proto_lambda,
             )
             acc = eval_tta(wrapper, loader, device)
         else:
