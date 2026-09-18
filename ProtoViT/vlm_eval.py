@@ -287,6 +287,14 @@ def parse_args() -> argparse.Namespace:
         default=10,
         help="Save full-dataset precompute cache every N batches instead of every batch.",
     )
+    parser.add_argument(
+        "--msp-only",
+        action="store_true",
+        help=(
+            "Replay inference for samples with existing reasoning artifacts, export maximum "
+            "softmax probability into 03_meta.json, and exit without loading the VLM."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1242,7 +1250,10 @@ def find_json_candidate(raw_text: str) -> str:
                 candidates.append(stripped[start : start + end])
         except json.JSONDecodeError:
             continue
-    return candidates[-1] if candidates else stripped
+    # Nested JSON produces one valid candidate for the outer object and more
+    # candidates for each inner object.  The complete response is the longest
+    # valid object, not the final inner object encountered while scanning.
+    return max(candidates, key=len) if candidates else stripped
 
 
 def extract_json_fragment(raw_text: str) -> Dict:
@@ -1260,9 +1271,15 @@ def extract_json_fragment(raw_text: str) -> Dict:
 class VLMScorer:
     """Lazy Qwen3-VL scorer with basic JSON retry handling."""
 
-    def __init__(self, model_id: str, max_new_tokens: int):
+    def __init__(
+        self,
+        model_id: str,
+        max_new_tokens: int,
+        enable_thinking: Optional[bool] = None,
+    ):
         self.model_id = model_id
         self.max_new_tokens = max_new_tokens
+        self.enable_thinking = enable_thinking
         self.model = None
         self.processor = None
         self.process_vision_info = None
@@ -1271,7 +1288,7 @@ class VLMScorer:
         if self.model is not None:
             return
 
-        from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+        from transformers import AutoProcessor
 
         try:
             from qwen_vl_utils import process_vision_info
@@ -1279,12 +1296,25 @@ class VLMScorer:
             process_vision_info = None
 
         LOGGER.info("Loading VLM: %s", self.model_id)
-        self.model = Qwen3VLForConditionalGeneration.from_pretrained(
-            self.model_id,
-            torch_dtype=torch.bfloat16,
-            attn_implementation="sdpa",
-            device_map="auto",
-        )
+        model_kwargs = {
+            "torch_dtype": torch.bfloat16,
+            "attn_implementation": "sdpa",
+            "device_map": "auto",
+        }
+        if "Qwen3.6" in self.model_id:
+            from transformers import AutoModelForMultimodalLM
+
+            self.model = AutoModelForMultimodalLM.from_pretrained(
+                self.model_id,
+                **model_kwargs,
+            )
+        else:
+            from transformers import Qwen3VLForConditionalGeneration
+
+            self.model = Qwen3VLForConditionalGeneration.from_pretrained(
+                self.model_id,
+                **model_kwargs,
+            )
         self.processor = AutoProcessor.from_pretrained(self.model_id)
         self.process_vision_info = process_vision_info
 
@@ -1294,6 +1324,9 @@ class VLMScorer:
         content = [{"type": "image", "image": str(path)} for path in image_paths]
         content.append({"type": "text", "text": prompt})
         messages = [{"role": "user", "content": content}]
+        template_kwargs = {}
+        if self.enable_thinking is not None:
+            template_kwargs["enable_thinking"] = self.enable_thinking
         try:
             inputs = self.processor.apply_chat_template(
                 messages,
@@ -1301,12 +1334,14 @@ class VLMScorer:
                 add_generation_prompt=True,
                 return_dict=True,
                 return_tensors="pt",
+                **template_kwargs,
             )
         except Exception:
             text = self.processor.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
+                **template_kwargs,
             )
             if self.process_vision_info is not None:
                 image_inputs, video_inputs = self.process_vision_info(messages)
@@ -1837,6 +1872,144 @@ def run_method_evaluation(
         torch.cuda.empty_cache()
 
 
+def export_msp_scores(
+    methods: Sequence[str],
+    manifest_samples: Sequence[Dict],
+    args: argparse.Namespace,
+    device: torch.device,
+) -> Dict[str, Dict]:
+    """Replay each method's stream and attach output confidence to saved samples.
+
+    Stateful TTA methods must see the same preceding examples as the reasoning-board
+    run.  Consequently this pass iterates each corruption in dataset order, but it
+    stops after the last saved target and avoids all prototype rendering and VLM work.
+    A reproduced prediction mismatch is recorded and excluded by the downstream
+    failure-detection analysis.
+    """
+    export_summary: Dict[str, Dict] = {}
+    eata_fishers = None
+    if "eata" in methods:
+        eata_targets = [
+            sample
+            for sample in manifest_samples
+            if sample_artifact_paths(args.results_dir, "eata", sample)["meta"].exists()
+        ]
+        if eata_targets:
+            eata_fishers = compute_eata_fishers(
+                args.model, device, args, manifest_samples
+            )
+
+    for method in methods:
+        targets_by_corruption: Dict[str, Dict[str, Dict]] = {}
+        for sample in manifest_samples:
+            artifacts = sample_artifact_paths(args.results_dir, method, sample)
+            if not artifacts["meta"].exists():
+                continue
+            key = precompute_key(sample["corruption_type"], sample["image_path"])
+            targets_by_corruption.setdefault(sample["corruption_type"], {})[key] = {
+                "sample": sample,
+                "meta_path": artifacts["meta"],
+            }
+
+        exported = mismatched = 0
+        total_targets = sum(len(items) for items in targets_by_corruption.values())
+        LOGGER.info("MSP export for %s: %d saved targets", DISPLAY_NAMES[method], total_targets)
+        for corruption_type in CORRUPTION_TYPES:
+            target_map = targets_by_corruption.get(corruption_type, {})
+            if not target_map:
+                continue
+
+            eval_model = setup_method_model(
+                method, args.model, device, args, manifest_samples, eata_fishers
+            )
+            eval_model.eval()
+            dataset = load_corruption_dataset(args.corrupted_dir, corruption_type, args.severity)
+            loader = torch.utils.data.DataLoader(
+                dataset,
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=4,
+                pin_memory=True,
+            )
+            remaining = set(target_map)
+            cursor = 0
+            pbar = tqdm(loader, desc=f"msp:{DISPLAY_NAMES[method]}:{corruption_type}", leave=False)
+            for images, _labels in pbar:
+                images = images.to(device)
+                with torch.no_grad():
+                    outputs = eval_model(images)
+                logits, _min_distances, _values = normalize_outputs(outputs)
+                probabilities = logits.float().softmax(dim=1)
+                top2 = probabilities.topk(k=min(2, probabilities.shape[1]), dim=1).values
+                predictions = probabilities.argmax(dim=1)
+
+                for batch_index in range(images.size(0)):
+                    dataset_index = cursor + batch_index
+                    sample_path, _ = dataset.samples[dataset_index]
+                    rel_path = os.path.relpath(sample_path, dataset.root)
+                    key = precompute_key(corruption_type, rel_path)
+                    if key not in remaining:
+                        continue
+
+                    meta_path = target_map[key]["meta_path"]
+                    meta = load_json(meta_path)
+                    reproduced_prediction = int(predictions[batch_index].item())
+                    saved_prediction = int(meta["predicted_index"])
+                    matches = reproduced_prediction == saved_prediction
+                    meta["max_softmax_probability"] = float(top2[batch_index, 0].item())
+                    meta["softmax_top2_margin"] = float(
+                        (top2[batch_index, 0] - top2[batch_index, 1]).item()
+                    ) if top2.shape[1] > 1 else 1.0
+                    meta["msp_prediction_index"] = reproduced_prediction
+                    meta["msp_prediction_matches_saved"] = matches
+                    meta["msp_export_batch_size"] = int(args.batch_size)
+                    meta["msp_definition"] = "max(softmax(logits))"
+                    write_json(meta_path, meta)
+                    exported += 1
+                    mismatched += int(not matches)
+                    remaining.remove(key)
+
+                cursor += images.size(0)
+                if not remaining:
+                    break
+
+            if remaining:
+                LOGGER.warning(
+                    "MSP export missed %d target(s) for %s/%s",
+                    len(remaining),
+                    DISPLAY_NAMES[method],
+                    corruption_type,
+                )
+            del eval_model
+            torch.cuda.empty_cache()
+
+        export_summary[method] = {
+            "display_name": DISPLAY_NAMES[method],
+            "num_targets": total_targets,
+            "num_exported": exported,
+            "num_prediction_mismatches": mismatched,
+            "batch_size": int(args.batch_size),
+        }
+        LOGGER.info(
+            "MSP export finished for %s: exported=%d mismatched=%d",
+            DISPLAY_NAMES[method],
+            exported,
+            mismatched,
+        )
+
+    for method, payload in export_summary.items():
+        write_json(
+            args.results_dir / "failure_detection" / f"msp_export_{method}.json",
+            {"method": method, "definition": "max(softmax(logits))", **payload},
+        )
+    if len(export_summary) > 1:
+        write_json(
+            args.results_dir / "failure_detection" / "msp_export_summary.json",
+            {"methods": export_summary, "definition": "max(softmax(logits))"},
+        )
+    return export_summary
+
+
 def aggregate_scores(results_dir: Path, manifest_samples: Sequence[Dict]) -> Dict[str, Dict]:
     aggregate: Dict[str, Dict] = {}
     for method in METHOD_ORDER:
@@ -2217,6 +2390,11 @@ def main() -> None:
         severity=args.severity,
         rebuild=args.rebuild_subset,
     )
+
+    if args.msp_only:
+        methods = [args.method] if args.method else METHOD_ORDER
+        export_msp_scores(methods, manifest["samples"], args, device)
+        return
 
     if args.part in (None, "A"):
         run_part_a(manifest, args, device, prototype_img_dir, class_names)

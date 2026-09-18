@@ -4,6 +4,56 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+@torch.no_grad()
+def relative_evidence_lambda(logits, similarities, prototype_classes,
+                             topk=3, eps=1e-8):
+    """Relative prototype-vs-output class evidence for one test batch."""
+    num_classes = logits.shape[1]
+    counts = torch.bincount(prototype_classes, minlength=num_classes)
+    order = torch.argsort(prototype_classes)
+
+    # ProtoViT has an equal number of prototypes per class. Use a grouped
+    # tensor in that common case to avoid one GPU operation per class.
+    if counts.min() > 0 and torch.equal(counts, counts[0].expand_as(counts)):
+        per_class = similarities[:, order].reshape(
+            similarities.shape[0], num_classes, int(counts[0].item())
+        )
+        k = min(max(int(topk), 1), per_class.shape[2])
+        class_scores = per_class.topk(k, dim=2).values.mean(dim=2)
+    else:
+        grouped = []
+        for class_index in range(num_classes):
+            class_mask = prototype_classes == class_index
+            if not class_mask.any():
+                grouped.append(similarities.new_full(
+                    (similarities.shape[0],), float('-inf')
+                ))
+                continue
+            per_class = similarities[:, class_mask]
+            k = min(max(int(topk), 1), per_class.shape[1])
+            grouped.append(per_class.topk(k, dim=1).values.mean(dim=1))
+        class_scores = torch.stack(grouped, dim=1)
+
+    pred_class = logits.argmax(dim=1)
+    selected = class_scores.gather(1, pred_class.unsqueeze(1)).squeeze(1)
+    competitor = class_scores.scatter(
+        1, pred_class.unsqueeze(1), float('-inf')
+    ).max(dim=1).values
+    proto_reliability = (
+        (selected - competitor).clamp_min(0.0)
+        / selected.abs().clamp_min(eps)
+    ).clamp(0.0, 1.0)
+
+    top2 = logits.softmax(dim=1).topk(2, dim=1).values
+    output_reliability = (
+        (top2[:, 0] - top2[:, 1]) / top2[:, 0].clamp_min(eps)
+    ).clamp(0.0, 1.0)
+    coefficient = proto_reliability / (
+        proto_reliability + output_reliability + eps
+    )
+    return coefficient.detach(), proto_reliability, output_reliability
+
 class ProtoEntropy(nn.Module):
     def __init__(self, model, optimizer, steps=1, episodic=False,
                  alpha_target=1.0, alpha_separation=0.0, alpha_coherence=0.0,
@@ -22,10 +72,19 @@ class ProtoEntropy(nn.Module):
                  adaptive_lambda_strategy='relative_reliability',
                  adaptive_delta0=0.25,
                  adaptive_topk=3,
+                 router_min_consistency=0.25,
                  lambda_ema_momentum=0.9,
                  lambda_min=0.05,
                  lambda_max=0.95,
-                 record_diagnostics=False):
+                 record_diagnostics=False,
+                 samplewise_lambda=False,
+                 semantic_prototype_weights=None,
+                 compatibility_student=None,
+                 compatibility_floor=0.25,
+                 semantic_logit_blend=0.0,
+                 semantic_fusion='fixed',
+                 semantic_contrast_weight=0.0,
+                 semantic_temperature=0.25):
         """
         Args:
             episodic: If True, uses 'episodic' reset_mode (backward compatibility)
@@ -92,11 +151,34 @@ class ProtoEntropy(nn.Module):
         self.adaptive_lambda_strategy = adaptive_lambda_strategy
         self.adaptive_delta0 = adaptive_delta0
         self.adaptive_topk = adaptive_topk
+        self.router_min_consistency = router_min_consistency
         self.lambda_ema_momentum = lambda_ema_momentum
         self.lambda_min = lambda_min
         self.lambda_max = lambda_max
         self.record_diagnostics = record_diagnostics
+        self.samplewise_lambda = samplewise_lambda
         self.lambda_ema = None
+        self.compatibility_student = compatibility_student
+        self.compatibility_floor = float(compatibility_floor)
+        self.semantic_logit_blend = float(semantic_logit_blend)
+        if semantic_fusion not in ('fixed', 'confidence_guard'):
+            raise ValueError(f'Unknown semantic fusion strategy: {semantic_fusion}')
+        self.semantic_fusion = semantic_fusion
+        self.semantic_contrast_weight = float(semantic_contrast_weight)
+        self.semantic_temperature = float(semantic_temperature)
+        if semantic_prototype_weights is None:
+            semantic_prototype_weights = torch.ones(
+                model.prototype_class_identity.shape[0], dtype=torch.float32
+            )
+            self.use_semantic_prototype_weights = False
+        else:
+            semantic_prototype_weights = torch.as_tensor(
+                semantic_prototype_weights, dtype=torch.float32
+            )
+            self.use_semantic_prototype_weights = True
+        self.register_buffer(
+            'semantic_prototype_weights', semantic_prototype_weights.clamp(0.05, 1.0)
+        )
         
         # New reset mechanism parameters
         # If reset_mode not specified, infer from episodic flag for backward compatibility
@@ -139,6 +221,9 @@ class ProtoEntropy(nn.Module):
             'adaptive_lambda_raw': [],
             'proto_signal_reliability': [],
             'output_signal_reliability': [],
+            'proto_gradient_consistency': [],
+            'output_gradient_consistency': [],
+            'adaptive_router_gate': [],
         }
 
     def forward(self, x):
@@ -313,13 +398,53 @@ class ProtoEntropy(nn.Module):
 
     def forward_no_adapt(self, x):
         """Forward pass without adaptation (used for metrics)."""
-        return self.model(x)
+        outputs = self.model(x)
+        if self.semantic_logit_blend <= 0:
+            return outputs
+        logits, min_distances, similarities = outputs
+        logits = self._blend_semantic_logits(logits, similarities)
+        return logits, min_distances, similarities
+
+    def _prediction_activations(self, similarities):
+        """Exactly reconstruct the activations consumed by ProtoViT's head."""
+        if similarities.dim() == 2:
+            return similarities
+        slots = torch.sigmoid(self.model.patch_select * self.model.temp)
+        num_subpatches = similarities.shape[-1]
+        scale = slots * num_subpatches / slots.sum(dim=-1, keepdim=True).clamp_min(1e-10)
+        return (similarities * scale).sum(dim=-1)
+
+    def _blend_semantic_logits(self, logits, similarities):
+        activations = self._prediction_activations(similarities)
+        quality = self.semantic_prototype_weights.to(activations.device)
+        semantic_logits = F.linear(
+            activations * quality.unsqueeze(0),
+            self.model.last_layer.weight,
+            self.model.last_layer.bias,
+        )
+        alpha = self.semantic_logit_blend
+        if self.semantic_fusion == 'confidence_guard':
+            # Preserve the native decision when suppressing low-quality
+            # prototypes produces a weaker, conflicting decision.  Conversely,
+            # retain VLM corrections when their class margin is at least as
+            # strong.  This controller uses no target labels.
+            with torch.no_grad():
+                native_prob = logits.float().softmax(dim=1)
+                semantic_prob = semantic_logits.float().softmax(dim=1)
+                native_margin = native_prob.topk(2, dim=1).values.diff(dim=1).abs().squeeze(1)
+                semantic_margin = semantic_prob.topk(2, dim=1).values.diff(dim=1).abs().squeeze(1)
+                disagree = logits.argmax(dim=1).ne(semantic_logits.argmax(dim=1))
+                accept = (~disagree) | (semantic_margin >= native_margin)
+                alpha = logits.new_full((logits.shape[0], 1), alpha) * accept.unsqueeze(1)
+        return (1.0 - alpha) * logits + alpha * semantic_logits
 
 
     @torch.enable_grad()
     def forward_and_adapt(self, x):
         # 1. Forward Pass
         logits, min_distances, similarities = self.model(x)
+        if self.semantic_logit_blend > 0:
+            logits = self._blend_semantic_logits(logits, similarities)
 
         # 2. Identify Target Class (Pseudo-label)
         with torch.no_grad():
@@ -329,6 +454,24 @@ class ProtoEntropy(nn.Module):
 
         # 3. Aggregate sub-prototypes using consensus strategy
         sim_scores = self.compute_consensus_similarity(similarities)
+
+        # The compatibility student is distilled from label-blind VLM board
+        # scores.  It is fixed and differentiation-free during test time.
+        compatibility_weight = torch.ones(logits.shape[0], device=logits.device)
+        if self.compatibility_student is not None:
+            from semantic_prototype_guidance import runtime_features, predict_student
+            compatibility_features = runtime_features(
+                logits.detach(), sim_scores.detach(), proto_identities,
+                self.model.last_layer.weight.detach(),
+                self.semantic_prototype_weights.to(logits.device),
+            )
+            compatibility = predict_student(
+                compatibility_features, self.compatibility_student
+            )
+            compatibility_weight = (
+                self.compatibility_floor
+                + (1.0 - self.compatibility_floor) * compatibility
+            ).detach()
 
         # ========== Geometric Filtering: Filter unreliable samples ==========
         if self.use_geometric_filter:
@@ -430,6 +573,12 @@ class ProtoEntropy(nn.Module):
             # Normalize weights to [0, 1] range per sample (softmax-like but preserve relative importance)
             # Use absolute values since negative weights also indicate importance
             importance_weights = torch.abs(class_weights)
+
+            # Downweight background/artifact prototypes using the one-time VLM
+            # bank audit. The mask and renormalization preserve baseline scale.
+            if self.use_semantic_prototype_weights:
+                importance_weights = importance_weights * \
+                    self.semantic_prototype_weights.to(importance_weights.device).unsqueeze(0)
             
             # Normalize to sum to 1 for each sample (only for target prototypes)
             importance_weights = importance_weights * target_mask
@@ -452,10 +601,31 @@ class ProtoEntropy(nn.Module):
             
             # Weight the loss by confidence AND reliability
             # Only count reliable samples in the mean
-            loss_target = (loss_per_sample * confidence * reliable_mask).sum() / (reliable_mask.sum() + 1e-8)
+            proto_sample_loss = loss_per_sample * confidence * reliable_mask * compatibility_weight
+            loss_target = proto_sample_loss.sum() / ((reliable_mask * compatibility_weight).sum() + 1e-8)
         else:
             # Only count reliable samples in the mean
-            loss_target = (loss_per_sample * reliable_mask).sum() / (reliable_mask.sum() + 1e-8)
+            proto_sample_loss = loss_per_sample * reliable_mask * compatibility_weight
+            loss_target = proto_sample_loss.sum() / ((reliable_mask * compatibility_weight).sum() + 1e-8)
+
+        # Active semantic purification. Downweighting alone merely ignores a
+        # spurious prototype; this term moves activation probability toward the
+        # VLM-ranked meaningful prototypes and away from the bottom-ranked ones.
+        loss_semantic = logits.new_tensor(0.0)
+        if self.semantic_contrast_weight > 0:
+            quality = self.semantic_prototype_weights.to(logits.device).unsqueeze(0)
+            target_logits = (sim_scores / max(self.semantic_temperature, 1e-6)).masked_fill(
+                ~target_mask.bool(), float('-inf')
+            )
+            activation_distribution = F.softmax(target_logits, dim=1)
+            expected_quality = (activation_distribution * quality).sum(dim=1).clamp_min(1e-6)
+            semantic_sample_loss = -torch.log(expected_quality)
+            semantic_sample_weight = reliable_mask * compatibility_weight
+            if self.use_confidence_weighting:
+                semantic_sample_weight = semantic_sample_weight * confidence
+            loss_semantic = (
+                semantic_sample_loss * semantic_sample_weight
+            ).sum() / semantic_sample_weight.sum().clamp_min(1e-8)
 
         # ========== PART B: Separation Loss (Push non-target prototypes to -1) ==========
         # For non-target prototypes, we want similarities to be close to -1 (dissimilar)
@@ -521,12 +691,13 @@ class ProtoEntropy(nn.Module):
             print (f"Loss: {loss}")
             loss = loss + self.alpha_source_kl * loss_source_kl
 
-        proto_loss = loss
+        proto_loss = loss + self.semantic_contrast_weight * loss_semantic
         logit_ent = -(logits.softmax(1) * logits.log_softmax(1)).sum(1)
         logit_sample_weight = reliable_mask
         if self.shared_confidence_weighting and self.use_confidence_weighting:
             logit_sample_weight = logit_sample_weight * confidence
-        loss_logit = (logit_ent * logit_sample_weight).sum() / (reliable_mask.sum() + 1e-8)
+        output_sample_loss = logit_ent * logit_sample_weight
+        loss_logit = output_sample_loss.sum() / (reliable_mask.sum() + 1e-8)
 
         class_target_mask = (proto_identities.unsqueeze(0) == pred_class.unsqueeze(1)).float()
         positive_scores = ((sim_scores.clamp(-1.0, 1.0) + 1.0) / 2.0).clamp_min(1e-8)
@@ -546,6 +717,10 @@ class ProtoEntropy(nn.Module):
 
         proto_weight = 1.0 - self.logit_weight
         logit_weight = self.logit_weight
+        adaptive_lambda_per_sample = None
+        proto_gradient_consistency = None
+        output_gradient_consistency = None
+        router_gate_fraction = None
         if self.adaptive_lambda:
             valid = reliable_mask.bool()
             if self.adaptive_lambda_strategy == 'activation_margin':
@@ -561,16 +736,124 @@ class ProtoEntropy(nn.Module):
                 adaptive_score = proto_reliability / (
                     proto_reliability + output_reliability + 1e-8
                 )
+            elif self.adaptive_lambda_strategy == 'relative_evidence':
+                adaptive_score, proto_reliability, output_reliability = \
+                    relative_evidence_lambda(
+                        logits=logits,
+                        similarities=positive_scores,
+                        prototype_classes=proto_identities,
+                        topk=self.adaptive_topk,
+                    )
+            elif self.adaptive_lambda_strategy == 'gradient_consistency':
+                proto_gradient_consistency = self._gradient_consistency(
+                    proto_sample_loss, reliable_mask
+                )
+                output_gradient_consistency = self._gradient_consistency(
+                    output_sample_loss, reliable_mask
+                )
+                denominator = (
+                    proto_gradient_consistency + output_gradient_consistency
+                )
+                if denominator.item() <= 1e-8:
+                    gradient_lambda = self.lambda_ema if self.lambda_ema is not None else 0.5
+                    gradient_lambda = logits.new_tensor(float(gradient_lambda))
+                else:
+                    gradient_lambda = proto_gradient_consistency / denominator
+                adaptive_score = torch.full_like(
+                    output_reliability, float(gradient_lambda.item())
+                )
+                # Reuse the common diagnostics as the actual controller signals.
+                proto_reliability = torch.full_like(
+                    proto_reliability, float(proto_gradient_consistency.item())
+                )
+                output_reliability = torch.full_like(
+                    output_reliability, float(output_gradient_consistency.item())
+                )
+            elif self.adaptive_lambda_strategy in (
+                    'source_free_router', 'source_free_router_absolute',
+                    'source_free_router_coverage',
+                    'source_free_router_coverage_absolute'):
+                masked_target = positive_scores.masked_fill(
+                    ~class_target_mask.bool(), float('-inf')
+                )
+                k_target = min(
+                    self.adaptive_topk,
+                    int(class_target_mask.sum(dim=1).min().item()),
+                )
+                top_target = masked_target.topk(max(k_target, 1), dim=1).values
+                native_delta = (top_target - 0.5).abs().mean(dim=1)
+                native_score = (
+                    native_delta / max(self.adaptive_delta0, 1e-8)
+                ).clamp(0.0, 1.0)
+                relative_score, relative_proto_rel, relative_output_rel = \
+                    relative_evidence_lambda(
+                        logits=logits,
+                        similarities=positive_scores,
+                        prototype_classes=proto_identities,
+                        topk=self.adaptive_topk,
+                    )
+                proto_gradient_consistency = self._gradient_consistency(
+                    proto_sample_loss, reliable_mask
+                )
+                output_gradient_consistency = self._gradient_consistency(
+                    output_sample_loss, reliable_mask
+                )
+                gradient_gate = (
+                    proto_gradient_consistency
+                    >= 2.0 * output_gradient_consistency.clamp_min(1e-8)
+                )
+                if self.adaptive_lambda_strategy in (
+                        'source_free_router_absolute',
+                        'source_free_router_coverage_absolute'):
+                    # A favorable ratio is insufficient when both gradient
+                    # signals are nearly incoherent.  The absolute floor is
+                    # normalized and shared across every backbone.
+                    gradient_gate = gradient_gate & (
+                        proto_gradient_consistency
+                        >= self.router_min_consistency
+                    )
+                if self.adaptive_lambda_strategy in (
+                        'source_free_router_coverage',
+                        'source_free_router_coverage_absolute'):
+                    reliable_fraction = reliable_mask.float().mean()
+                    coverage_guard = (
+                        relative_output_rel[valid].mean() >= 0.90
+                    ) & (reliable_fraction <= 0.40)
+                    native_gate = torch.full_like(
+                        native_score, dtype=torch.bool,
+                        fill_value=(
+                            bool(gradient_gate.item())
+                            or bool(coverage_guard.item())
+                        ),
+                    )
+                else:
+                    native_gate = torch.full_like(
+                        native_score, dtype=torch.bool,
+                        fill_value=bool(gradient_gate.item()),
+                    )
+                adaptive_score = torch.where(
+                    native_gate, native_score, relative_score
+                )
+                proto_reliability = relative_proto_rel
+                output_reliability = relative_output_rel
+                router_gate_fraction = native_gate[valid].float().mean().item()
             else:
                 raise ValueError(f"Unknown adaptive lambda strategy: {self.adaptive_lambda_strategy}")
-            current_lambda = adaptive_score[valid].mean().detach().item()
-            if self.lambda_ema is None:
-                self.lambda_ema = current_lambda
+            adaptive_lambda_per_sample = adaptive_score.detach().clamp(
+                self.lambda_min, self.lambda_max
+            )
+            current_lambda = adaptive_lambda_per_sample[valid].mean().item()
+            if self.samplewise_lambda:
+                proto_weight = current_lambda
+                logit_weight = 1.0 - proto_weight
             else:
-                self.lambda_ema = (self.lambda_ema_momentum * self.lambda_ema +
-                                   (1.0 - self.lambda_ema_momentum) * current_lambda)
-            proto_weight = min(self.lambda_max, max(self.lambda_min, self.lambda_ema))
-            logit_weight = 1.0 - proto_weight
+                if self.lambda_ema is None:
+                    self.lambda_ema = current_lambda
+                else:
+                    self.lambda_ema = (self.lambda_ema_momentum * self.lambda_ema +
+                                       (1.0 - self.lambda_ema_momentum) * current_lambda)
+                proto_weight = min(self.lambda_max, max(self.lambda_min, self.lambda_ema))
+                logit_weight = 1.0 - proto_weight
 
         need_grad_norms = self.gradient_normalize or self.record_diagnostics
         proto_grad_norm = self._gradient_norm(proto_loss) if need_grad_norms else None
@@ -581,7 +864,25 @@ class ProtoEntropy(nn.Module):
             proto_term = proto_loss / (proto_grad_norm.detach() + 1e-8)
             output_term = loss_logit / (output_grad_norm.detach() + 1e-8)
 
-        loss = proto_weight * proto_term + logit_weight * output_term
+        if self.samplewise_lambda:
+            if adaptive_lambda_per_sample is None:
+                raise ValueError('samplewise_lambda requires adaptive_lambda=True')
+            if self.alpha_separation != 0 or self.alpha_coherence != 0 or self.alpha_source_kl != 0:
+                raise ValueError(
+                    'samplewise_lambda currently supports the paper configuration '
+                    'with target prototype entropy only'
+                )
+            proto_sample_term = self.alpha_target * proto_sample_loss
+            output_sample_term = output_sample_loss
+            if self.gradient_normalize:
+                proto_sample_term = proto_sample_term / (proto_grad_norm.detach() + 1e-8)
+                output_sample_term = output_sample_term / (output_grad_norm.detach() + 1e-8)
+            loss = (
+                adaptive_lambda_per_sample * proto_sample_term
+                + (1.0 - adaptive_lambda_per_sample) * output_sample_term
+            ).sum() / (reliable_mask.sum() + 1e-8)
+        else:
+            loss = proto_weight * proto_term + logit_weight * output_term
 
         if self.record_diagnostics or self.adaptive_lambda:
             valid = reliable_mask.bool()
@@ -597,6 +898,22 @@ class ProtoEntropy(nn.Module):
                 float(proto_reliability[valid].mean().detach().item()))
             self.adaptation_stats['output_signal_reliability'].append(
                 float(output_reliability[valid].mean().detach().item()))
+            if proto_gradient_consistency is not None:
+                self.adaptation_stats['proto_gradient_consistency'].append(
+                    float(proto_gradient_consistency.item())
+                )
+                self.adaptation_stats['output_gradient_consistency'].append(
+                    float(output_gradient_consistency.item())
+                )
+                self.adaptation_stats['adaptive_router_gate'].append(
+                    float(
+                        router_gate_fraction
+                        if router_gate_fraction is not None else
+                        (proto_gradient_consistency.item() >= 2.0 * max(
+                            output_gradient_consistency.item(), 1e-8
+                        ))
+                    )
+                )
 
         loss.backward()
         self.optimizer.step()
@@ -614,6 +931,45 @@ class ProtoEntropy(nn.Module):
         if not squared:
             return loss.detach().new_tensor(0.0)
         return torch.stack(squared).sum().sqrt()
+
+    def _gradient_consistency(self, per_sample_loss, reliable_mask):
+        """Scale-invariant gradient agreement across two batch halves."""
+        indices = reliable_mask.bool().nonzero(as_tuple=False).flatten()
+        if indices.numel() < 4:
+            return per_sample_loss.detach().new_tensor(0.0)
+        first = indices[::2]
+        second = indices[1::2]
+        first_loss = per_sample_loss[first].mean()
+        second_loss = per_sample_loss[second].mean()
+        params = [
+            p for group in self.optimizer.param_groups for p in group['params']
+            if p.requires_grad
+        ]
+        first_grads = torch.autograd.grad(
+            first_loss, params, retain_graph=True, allow_unused=True
+        )
+        second_grads = torch.autograd.grad(
+            second_loss, params, retain_graph=True, allow_unused=True
+        )
+        dot = first_loss.detach().new_tensor(0.0, dtype=torch.float32)
+        first_sq = dot.clone()
+        second_sq = dot.clone()
+        for first_grad, second_grad in zip(first_grads, second_grads):
+            if first_grad is None or second_grad is None:
+                continue
+            first_float = first_grad.detach().float()
+            second_float = second_grad.detach().float()
+            dot = dot + (first_float * second_float).sum()
+            first_sq = first_sq + first_float.pow(2).sum()
+            second_sq = second_sq + second_float.pow(2).sum()
+        first_norm = first_sq.sqrt()
+        second_norm = second_sq.sqrt()
+        cosine = dot / (first_norm * second_norm + 1e-12)
+        norm_balance = (
+            2.0 * torch.minimum(first_norm, second_norm)
+            / (first_norm + second_norm + 1e-12)
+        )
+        return cosine.clamp(0.0, 1.0) * norm_balance.clamp(0.0, 1.0)
 
 
 class ProtoEntropyEATA(nn.Module):
@@ -741,6 +1097,15 @@ def collect_params(model, adaptation_mode='layernorm_only'):
     """
     params = []
     names = []
+
+    # A literal full-model ablation for the paper.  Keep this distinct from
+    # the legacy ``all_adaptive`` mode, which only enables prototypes, patch
+    # selection, and the classifier head.
+    if adaptation_mode == 'all_parameters':
+        for name, parameter in model.named_parameters():
+            params.append(parameter)
+            names.append(name)
+        return params, names
     
     # Always include LayerNorm/BatchNorm if mode includes 'layernorm'
     if 'layernorm' in adaptation_mode:
@@ -801,6 +1166,10 @@ def configure_model(model, adaptation_mode='layernorm_only'):
     model.eval()
     # disable grad, to (re-)enable only what ProtoEntropy updates
     model.requires_grad_(False)
+
+    if adaptation_mode == 'all_parameters':
+        model.requires_grad_(True)
+        return model
     
     # Configure LayerNorms/BatchNorms
     if 'layernorm' in adaptation_mode:

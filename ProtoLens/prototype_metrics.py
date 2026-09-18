@@ -232,6 +232,15 @@ class ProtoLensMetricsEvaluator:
         self.clean_logits = torch.cat(all_logits, dim=0)
         self.clean_predictions = torch.cat(all_predictions, dim=0)
         self.clean_labels = torch.cat(all_labels, dim=0)
+        if max_samples is not None:
+            if self.clean_activations is not None:
+                self.clean_activations = self.clean_activations[:max_samples]
+            self.clean_logits = self.clean_logits[:max_samples]
+            self.clean_predictions = self.clean_predictions[:max_samples]
+            self.clean_labels = self.clean_labels[:max_samples]
+        self.clean_accuracy = float(
+            (self.clean_predictions == self.clean_labels).float().mean().item()
+        )
         
         if verbose:
             print(f"  Collected baseline from {n_samples} samples")
@@ -328,13 +337,16 @@ class ProtoLensMetricsEvaluator:
         if clean_activations is None or adapted_activations is None:
             return {'PAC_mean': None, 'PAC_std': None}
         
-        # Ensure same device and length
+        # Paired metrics are undefined unless every row is the same sample.
         adapted_activations = adapted_activations.to(self.device)
         clean_activations = clean_activations.to(self.device)
-        
-        min_len = min(len(clean_activations), len(adapted_activations))
-        clean = clean_activations[:min_len]
-        adapted = adapted_activations[:min_len]
+        if len(clean_activations) != len(adapted_activations):
+            raise RuntimeError(
+                "PAC requires equal clean/corrupted sample counts: "
+                f"clean={len(clean_activations)}, corrupt={len(adapted_activations)}"
+            )
+        clean = clean_activations
+        adapted = adapted_activations
         
         # Compute cosine similarity per sample
         clean_norm = F.normalize(clean, dim=1)
@@ -473,7 +485,8 @@ class ProtoLensMetricsEvaluator:
         }
     
     def compute_calibration(self, adapted_predictions: torch.Tensor,
-                           adapted_logits: torch.Tensor) -> Dict:
+                           adapted_logits: torch.Tensor,
+                           labels: Optional[torch.Tensor] = None) -> Dict:
         """
         Compute calibration metrics comparing to baseline.
         
@@ -489,19 +502,25 @@ class ProtoLensMetricsEvaluator:
         clean_predictions = self.clean_predictions.cpu()
         clean_logits = self.clean_logits.cpu()
         
-        # Ensure same length
-        min_len = min(len(clean_predictions), len(adapted_predictions))
-        clean_preds = clean_predictions[:min_len]
-        adapted_preds = adapted_predictions[:min_len]
-        clean_logs = clean_logits[:min_len]
-        adapted_logs = adapted_logits[:min_len]
+        lengths = {
+            'clean predictions': len(clean_predictions),
+            'clean logits': len(clean_logits),
+            'corrupted predictions': len(adapted_predictions),
+            'corrupted logits': len(adapted_logits),
+        }
+        if len(set(lengths.values())) != 1:
+            raise RuntimeError(f"Prediction Stability requires exact pairing: {lengths}")
+        clean_preds = clean_predictions
+        adapted_preds = adapted_predictions
+        clean_logs = clean_logits
+        adapted_logs = adapted_logits
         
         # Prediction agreement
         agreement = (clean_preds == adapted_preds).float().mean().item()
         
         # Logit correlation (average per sample)
         correlations = []
-        for i in range(min_len):
+        for i in range(len(clean_preds)):
             clean_l = clean_logs[i].numpy()
             adapted_l = adapted_logs[i].numpy()
             corr, _ = stats.pearsonr(clean_l, adapted_l)
@@ -510,10 +529,34 @@ class ProtoLensMetricsEvaluator:
         
         avg_corr = float(np.mean(correlations)) if correlations else 0.0
         
-        return {
+        metrics = {
             'calibration_agreement': agreement,
             'calibration_logit_corr': avg_corr
         }
+        if labels is not None:
+            labels = labels.cpu()
+            clean_labels = self.clean_labels.cpu()
+            if len(labels) != len(clean_labels) or not torch.equal(labels, clean_labels):
+                raise RuntimeError("Clean/corrupted labels or sample ordering do not match")
+            clean_accuracy = float((clean_preds == labels).float().mean().item())
+            corrupt_accuracy = float((adapted_preds == labels).float().mean().item())
+            lower = max(0.0, clean_accuracy + corrupt_accuracy - 1.0)
+            upper = 1.0 - abs(clean_accuracy - corrupt_accuracy)
+            tolerance = 1.0 / max(len(labels), 1) + 1e-7
+            if agreement < lower - tolerance or agreement > upper + tolerance:
+                raise RuntimeError(
+                    "Prediction stability violates paired-accuracy bounds: "
+                    f"clean={clean_accuracy:.6f}, corrupt={corrupt_accuracy:.6f}, "
+                    f"stability={agreement:.6f}, allowed=[{lower:.6f}, {upper:.6f}]"
+                )
+            metrics.update({
+                'paired_num_samples': len(labels),
+                'clean_accuracy_reference': clean_accuracy,
+                'stability_bound_lower': lower,
+                'stability_bound_upper': upper,
+                'stability_bounds_passed': True,
+            })
+        return metrics
     
     def compute_gt_class_contribution(self, adapted_activations: torch.Tensor,
                                        labels: torch.Tensor) -> Dict:
@@ -534,10 +577,19 @@ class ProtoLensMetricsEvaluator:
         clean_activations = self.clean_activations.to(self.device)
         labels = labels.to(self.device)
         
-        min_len = min(len(clean_activations), len(adapted_activations))
-        clean_acts = clean_activations[:min_len]
-        adapted_acts = adapted_activations[:min_len]
-        labels = labels[:min_len]
+        lengths = {
+            'clean activations': len(clean_activations),
+            'corrupted activations': len(adapted_activations),
+            'labels': len(labels),
+        }
+        if len(set(lengths.values())) != 1:
+            raise RuntimeError(f"GT contribution requires exact pairing: {lengths}")
+        clean_acts = clean_activations
+        adapted_acts = adapted_activations
+        if self.clean_labels is not None and not torch.equal(
+            labels.cpu(), self.clean_labels.cpu()
+        ):
+            raise RuntimeError("GT contribution labels or sample ordering do not match")
         
         contribution_changes = []
         
@@ -607,7 +659,7 @@ class ProtoLensMetricsEvaluator:
         results.update(pca_weighted_metrics)
         
         # Calibration
-        calibration_metrics = self.compute_calibration(predictions, logits)
+        calibration_metrics = self.compute_calibration(predictions, logits, labels)
         results.update(calibration_metrics)
         
         # GT Class Contribution

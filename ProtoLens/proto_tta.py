@@ -20,6 +20,51 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+@torch.no_grad()
+def relative_evidence_lambda(logits, proto_probs, classifier_weights,
+                             topk=3, eps=1e-8):
+    """Relative evidence for shared ProtoLens prototypes.
+
+    A prototype supports a class when that class has a positive classifier
+    weight for it. This is the shared-prototype analogue of the explicit
+    prototype-to-class assignments used by ProtoPNet/ProtoViT/ProtoPFormer.
+    """
+    num_classes = logits.shape[1]
+    class_scores = []
+    for class_index in range(num_classes):
+        support = classifier_weights[class_index] > 0
+        if support.any():
+            per_class = proto_probs[:, support]
+        else:
+            # Keep the statistic defined for unusual checkpoints with no
+            # positive weight by using the most class-associated prototypes.
+            k_fallback = min(max(int(topk), 1), classifier_weights.shape[1])
+            indices = classifier_weights[class_index].topk(k_fallback).indices
+            per_class = proto_probs[:, indices]
+        k = min(max(int(topk), 1), per_class.shape[1])
+        class_scores.append(per_class.topk(k, dim=1).values.mean(dim=1))
+    class_scores = torch.stack(class_scores, dim=1)
+
+    pred_class = logits.argmax(dim=1)
+    selected = class_scores.gather(1, pred_class.unsqueeze(1)).squeeze(1)
+    competitor = class_scores.scatter(
+        1, pred_class.unsqueeze(1), float('-inf')
+    ).max(dim=1).values
+    proto_reliability = (
+        (selected - competitor).clamp_min(0.0)
+        / selected.abs().clamp_min(eps)
+    ).clamp(0.0, 1.0)
+
+    top2 = logits.softmax(dim=1).topk(2, dim=1).values
+    output_reliability = (
+        (top2[:, 0] - top2[:, 1]) / top2[:, 0].clamp_min(eps)
+    ).clamp(0.0, 1.0)
+    coefficient = proto_reliability / (
+        proto_reliability + output_reliability + eps
+    )
+    return coefficient.detach(), proto_reliability, output_reliability
+
+
 class ProtoTTA(nn.Module):
     """ProtoTTA adapts using prototype-aware binary entropy minimization."""
     
@@ -27,7 +72,13 @@ class ProtoTTA(nn.Module):
                  use_geometric_filter=True, geo_filter_threshold=0.3,
                  consensus_strategy='max', consensus_ratio=0.5,
                  importance_mode='global', sigmoid_temperature=5.0,
-                 logit_weight=0.0):
+                 logit_weight=0.0, adaptive_lambda=False,
+                 samplewise_lambda=False, gradient_normalize=False,
+                 adaptive_delta0=0.25, adaptive_topk=3,
+                 router_min_consistency=0.25,
+                 lambda_ema_momentum=0.0, lambda_min=0.0,
+                 lambda_max=1.0, record_diagnostics=False,
+                 adaptive_lambda_strategy='activation_margin'):
         """
         Args:
             model: ProtoLens model (must return similarity as 4th output)
@@ -70,6 +121,17 @@ class ProtoTTA(nn.Module):
 
         # Unified λ: fraction of logit-entropy in total loss (0 = pure proto, 1 = pure logit)
         self.logit_weight = logit_weight
+        self.adaptive_lambda = adaptive_lambda
+        self.samplewise_lambda = samplewise_lambda
+        self.gradient_normalize = gradient_normalize
+        self.adaptive_delta0 = adaptive_delta0
+        self.adaptive_topk = adaptive_topk
+        self.router_min_consistency = router_min_consistency
+        self.lambda_ema_momentum = lambda_ema_momentum
+        self.lambda_min = lambda_min
+        self.lambda_max = lambda_max
+        self.record_diagnostics = record_diagnostics
+        self.adaptive_lambda_strategy = adaptive_lambda_strategy
         
         # Filter mode - 'geometric' or 'none'
         self.filter_mode = 'geometric' if use_geometric_filter else 'none'
@@ -87,7 +149,20 @@ class ProtoTTA(nn.Module):
                 'filtered_out': 0,
                 'avg_similarity': [],
                 'avg_confidence': []
-            }
+            },
+            'proto_loss': [],
+            'output_loss': [],
+            'proto_grad_norm': [],
+            'output_grad_norm': [],
+            'adaptive_lambda': [],
+            'adaptive_lambda_raw': [],
+            'adaptive_margin': [],
+            'adaptive_saturation_rate': [],
+            'proto_signal_reliability': [],
+            'output_signal_reliability': [],
+            'proto_gradient_consistency': [],
+            'output_gradient_consistency': [],
+            'adaptive_router_gate': [],
         }
 
     def forward(self, input_ids=None, attention_mask=None, special_tokens_mask=None,
@@ -110,6 +185,17 @@ class ProtoTTA(nn.Module):
                 importance_mode=self.importance_mode,
                 sigmoid_temperature=self.sigmoid_temperature,
                 logit_weight=self.logit_weight,
+                adaptive_lambda=self.adaptive_lambda,
+                samplewise_lambda=self.samplewise_lambda,
+                gradient_normalize=self.gradient_normalize,
+                adaptive_delta0=self.adaptive_delta0,
+                adaptive_topk=self.adaptive_topk,
+                router_min_consistency=self.router_min_consistency,
+                lambda_ema_momentum=self.lambda_ema_momentum,
+                lambda_min=self.lambda_min,
+                lambda_max=self.lambda_max,
+                record_diagnostics=self.record_diagnostics,
+                adaptive_lambda_strategy=self.adaptive_lambda_strategy,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 special_tokens_mask=special_tokens_mask,
@@ -129,6 +215,7 @@ class ProtoTTA(nn.Module):
         if self.model_state is None or self.optimizer_state is None:
             raise Exception("cannot reset without saved model/optimizer state")
         self.model.load_state_dict(self.model_state, strict=True)
+        self.adaptation_stats.pop('_lambda_ema', None)
     
     def __getattr__(self, name):
         """Forward attribute access to the underlying model if not found."""
@@ -201,6 +288,13 @@ def binary_entropy_loss(similarities, epsilon=1e-8):
 def forward_and_adapt_proto(model, optimizer, use_geometric_filter, geo_filter_threshold,
                             consensus_strategy, consensus_ratio, importance_mode='global',
                             sigmoid_temperature=5.0, logit_weight=0.0,
+                            adaptive_lambda=False, samplewise_lambda=False,
+                            gradient_normalize=False, adaptive_delta0=0.25,
+                            adaptive_topk=3, router_min_consistency=0.25,
+                            lambda_ema_momentum=0.0,
+                            lambda_min=0.0, lambda_max=1.0,
+                            record_diagnostics=False,
+                            adaptive_lambda_strategy='activation_margin',
                             input_ids=None, attention_mask=None, special_tokens_mask=None,
                             mode="test", original_text=None, current_batch_num=None,
                             adaptation_stats=None, **kwargs):
@@ -432,6 +526,7 @@ def forward_and_adapt_proto(model, optimizer, use_geometric_filter, geo_filter_t
             
             # Average over prototypes and samples
             loss = weighted_loss.mean()
+            proto_loss_per_sample = weighted_loss.mean(dim=1)
             
             # Track statistics
             if adaptation_stats is not None:
@@ -449,6 +544,7 @@ def forward_and_adapt_proto(model, optimizer, use_geometric_filter, geo_filter_t
             entropy = -(proto_probs * torch.log(proto_probs) + 
                        (1 - proto_probs) * torch.log(1 - proto_probs))
             loss = entropy.mean()
+            proto_loss_per_sample = entropy.mean(dim=1)
         
         # Check for NaN
         if torch.isnan(loss) or torch.isinf(loss):
@@ -457,13 +553,241 @@ def forward_and_adapt_proto(model, optimizer, use_geometric_filter, geo_filter_t
             optimizer.zero_grad()
             return outputs.detach(), loss_mu, augmented_loss, similarities, 0
 
-        # Unified λ: blend prototype entropy with logit entropy
-        # L = (1-λ)*proto_loss + λ*logit_entropy
-        if logit_weight > 0:
+        proto_loss = loss
+        need_output_loss = logit_weight > 0 or adaptive_lambda
+        loss_logit = None
+        output_loss_per_sample = None
+        if need_output_loss:
             logit_ent = -(outputs_filtered.softmax(1) * outputs_filtered.log_softmax(1)).sum(1)
+            output_loss_per_sample = logit_ent
             loss_logit = logit_ent.mean()
-            if not (torch.isnan(loss_logit) or torch.isinf(loss_logit)):
-                loss = (1.0 - logit_weight) * loss + logit_weight * loss_logit
+            if torch.isnan(loss_logit) or torch.isinf(loss_logit):
+                optimizer.zero_grad()
+                return outputs.detach(), loss_mu, augmented_loss, similarities, 0
+
+        need_grad_norms = gradient_normalize or record_diagnostics
+        proto_grad_norm = _gradient_norm(proto_loss, optimizer) if need_grad_norms else None
+        output_grad_norm = (
+            _gradient_norm(loss_logit, optimizer)
+            if need_grad_norms and loss_logit is not None else None
+        )
+
+        if adaptive_lambda:
+            controller_proto_reliability = None
+            controller_output_reliability = None
+            router_gate_fraction = None
+            router_strategies = (
+                'source_free_router',
+                'source_free_router_absolute',
+                'source_free_router_evidence',
+                'source_free_router_coverage',
+                'source_free_router_coverage_absolute',
+            )
+            if adaptive_lambda_strategy == 'activation_margin' or \
+                    adaptive_lambda_strategy in router_strategies:
+                # Preserve the original activation-margin controller exactly.
+                if hasattr(model, 'fc') and hasattr(model.fc, 'weight'):
+                    support_mask = fc_weights_for_pred > 0
+                    target_activations = proto_probs.masked_fill(
+                        ~support_mask, float('-inf')
+                    )
+                    k = min(max(int(adaptive_topk), 1), target_activations.shape[1])
+                    top_target = target_activations.topk(k, dim=1).values
+                    valid_target = torch.isfinite(top_target)
+                    target_margin = torch.where(
+                        valid_target, (top_target - 0.5).abs(),
+                        torch.zeros_like(top_target)
+                    )
+                    adaptive_margin = (
+                        target_margin.sum(dim=1)
+                        / valid_target.sum(dim=1).clamp_min(1)
+                    )
+                    missing_target = ~valid_target.any(dim=1)
+                    if missing_target.any():
+                        fallback = proto_probs[missing_target].topk(k, dim=1).values
+                        adaptive_margin[missing_target] = (
+                            fallback - 0.5
+                        ).abs().mean(dim=1)
+                else:
+                    k = min(max(int(adaptive_topk), 1), proto_probs.shape[1])
+                    top_target = proto_probs.topk(k, dim=1).values
+                    adaptive_margin = (top_target - 0.5).abs().mean(dim=1)
+                lambda_per_sample = (
+                    adaptive_margin / max(adaptive_delta0, 1e-8)
+                ).clamp(lambda_min, lambda_max).detach()
+            if adaptive_lambda_strategy == 'relative_evidence':
+                if not (hasattr(model, 'fc') and hasattr(model.fc, 'weight')):
+                    raise ValueError('relative_evidence requires model.fc.weight')
+                (lambda_per_sample,
+                 controller_proto_reliability,
+                 controller_output_reliability) = relative_evidence_lambda(
+                    logits=outputs_filtered,
+                    proto_probs=proto_probs,
+                    classifier_weights=model.fc.weight,
+                    topk=adaptive_topk,
+                )
+                lambda_per_sample = lambda_per_sample.clamp(
+                    lambda_min, lambda_max
+                )
+                adaptive_margin = controller_proto_reliability
+            elif adaptive_lambda_strategy in router_strategies:
+                if not (hasattr(model, 'fc') and hasattr(model.fc, 'weight')):
+                    raise ValueError(
+                        f'{adaptive_lambda_strategy} requires model.fc.weight'
+                    )
+                native_lambda = lambda_per_sample
+                native_margin = adaptive_margin
+                (relative_lambda,
+                 relative_proto_reliability,
+                 relative_output_reliability) = relative_evidence_lambda(
+                    logits=outputs_filtered,
+                    proto_probs=proto_probs,
+                    classifier_weights=model.fc.weight,
+                    topk=adaptive_topk,
+                )
+                relative_lambda = relative_lambda.clamp(lambda_min, lambda_max)
+                proto_gradient_consistency = _gradient_consistency(
+                    proto_loss_per_sample, optimizer
+                )
+                output_gradient_consistency = _gradient_consistency(
+                    output_loss_per_sample, optimizer
+                )
+                gradient_gate = (
+                    proto_gradient_consistency
+                    >= 2.0 * output_gradient_consistency.clamp_min(1e-8)
+                )
+                if adaptive_lambda_strategy in (
+                        'source_free_router_absolute',
+                        'source_free_router_coverage_absolute'):
+                    gradient_gate = gradient_gate & (
+                        proto_gradient_consistency >= router_min_consistency
+                    )
+
+                if adaptive_lambda_strategy == 'source_free_router_evidence':
+                    # A saturated softmax margin is not evidence that output
+                    # entropy is trustworthy.  Override it samplewise when the
+                    # prototype space still separates the predicted class.
+                    guard = (
+                        (relative_output_reliability >= 0.90)
+                        & (relative_proto_reliability >= 0.40)
+                    )
+                    native_gate = guard | bool(gradient_gate.item())
+                elif adaptive_lambda_strategy in (
+                        'source_free_router_coverage',
+                        'source_free_router_coverage_absolute'):
+                    # If only a small fraction passes the independent
+                    # geometric filter, a saturated output margin is treated
+                    # as overconfidence rather than reliability.
+                    reliable_fraction = float(num_reliable) / max(batch_size, 1)
+                    coverage_guard = (
+                        relative_output_reliability.mean() >= 0.90
+                    ) & (reliable_fraction <= 0.40)
+                    native_gate = torch.full_like(
+                        native_lambda, dtype=torch.bool,
+                        fill_value=(
+                            bool(gradient_gate.item())
+                            or bool(coverage_guard.item())
+                        ),
+                    )
+                else:
+                    native_gate = torch.full_like(
+                        native_lambda, dtype=torch.bool,
+                        fill_value=bool(gradient_gate.item()),
+                    )
+
+                lambda_per_sample = torch.where(
+                    native_gate, native_lambda, relative_lambda
+                )
+                adaptive_margin = torch.where(
+                    native_gate, native_margin, relative_proto_reliability
+                )
+                controller_proto_reliability = relative_proto_reliability
+                controller_output_reliability = relative_output_reliability
+                router_gate_fraction = native_gate.float().mean().item()
+            else:
+                if adaptive_lambda_strategy != 'activation_margin':
+                    raise ValueError(
+                        f'Unknown adaptive lambda strategy: {adaptive_lambda_strategy}'
+                    )
+
+            current_lambda = lambda_per_sample.mean().item()
+
+            if samplewise_lambda:
+                proto_weight = current_lambda  # diagnostic mean only
+                proto_sample_term = proto_loss_per_sample
+                output_sample_term = output_loss_per_sample
+                if gradient_normalize:
+                    proto_sample_term = proto_sample_term / (proto_grad_norm.detach() + 1e-8)
+                    output_sample_term = output_sample_term / (output_grad_norm.detach() + 1e-8)
+                loss = (
+                    lambda_per_sample * proto_sample_term
+                    + (1.0 - lambda_per_sample) * output_sample_term
+                ).mean()
+            else:
+                previous_lambda = (
+                    adaptation_stats.get('_lambda_ema')
+                    if adaptation_stats is not None else None
+                )
+                if previous_lambda is None:
+                    smoothed_lambda = current_lambda
+                else:
+                    smoothed_lambda = (
+                        lambda_ema_momentum * previous_lambda
+                        + (1.0 - lambda_ema_momentum) * current_lambda
+                    )
+                proto_weight = min(lambda_max, max(lambda_min, smoothed_lambda))
+                if adaptation_stats is not None:
+                    adaptation_stats['_lambda_ema'] = proto_weight
+                proto_term = proto_loss
+                output_term = loss_logit
+                if gradient_normalize:
+                    proto_term = proto_term / (proto_grad_norm.detach() + 1e-8)
+                    output_term = output_term / (output_grad_norm.detach() + 1e-8)
+                loss = proto_weight * proto_term + (1.0 - proto_weight) * output_term
+
+            if adaptation_stats is not None:
+                adaptation_stats['adaptive_lambda'].append(float(proto_weight))
+                adaptation_stats['adaptive_lambda_raw'].append(float(current_lambda))
+                adaptation_stats['adaptive_margin'].append(float(adaptive_margin.mean().item()))
+                saturation = ((lambda_per_sample <= lambda_min + 1e-8) |
+                              (lambda_per_sample >= lambda_max - 1e-8)).float().mean()
+                adaptation_stats['adaptive_saturation_rate'].append(float(saturation.item()))
+                if controller_proto_reliability is not None:
+                    adaptation_stats['proto_signal_reliability'].append(
+                        float(controller_proto_reliability.mean().item())
+                    )
+                    adaptation_stats['output_signal_reliability'].append(
+                        float(controller_output_reliability.mean().item())
+                    )
+                if adaptive_lambda_strategy in router_strategies:
+                    adaptation_stats['proto_gradient_consistency'].append(
+                        float(proto_gradient_consistency.item())
+                    )
+                    adaptation_stats['output_gradient_consistency'].append(
+                        float(output_gradient_consistency.item())
+                    )
+                    adaptation_stats['adaptive_router_gate'].append(
+                        float(
+                            router_gate_fraction
+                            if router_gate_fraction is not None else
+                            (proto_gradient_consistency.item() >= 2.0 * max(
+                                output_gradient_consistency.item(), 1e-8
+                            ))
+                        )
+                    )
+        elif logit_weight > 0:
+            # Preserve the existing fixed-λ implementation exactly.
+            loss = (1.0 - logit_weight) * proto_loss + logit_weight * loss_logit
+
+        if adaptation_stats is not None and (record_diagnostics or adaptive_lambda):
+            adaptation_stats['proto_loss'].append(float(proto_loss.detach().item()))
+            adaptation_stats['output_loss'].append(
+                float(loss_logit.detach().item()) if loss_logit is not None else 0.0
+            )
+            if proto_grad_norm is not None:
+                adaptation_stats['proto_grad_norm'].append(float(proto_grad_norm.item()))
+            if output_grad_norm is not None:
+                adaptation_stats['output_grad_norm'].append(float(output_grad_norm.item()))
     else:
         loss = torch.tensor(0.0, device=outputs.device, requires_grad=True)
 
@@ -492,6 +816,56 @@ def forward_and_adapt_proto(model, optimizer, use_geometric_filter, geo_filter_t
         optimizer.zero_grad()
     
     return outputs.detach(), loss_mu, augmented_loss, similarities, num_reliable
+
+
+def _gradient_norm(loss, optimizer):
+    """L2 norm of a loss gradient over exactly the adapted parameters."""
+    params = [
+        p for group in optimizer.param_groups for p in group['params']
+        if p.requires_grad
+    ]
+    grads = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=True)
+    squared = [g.detach().float().pow(2).sum() for g in grads if g is not None]
+    if not squared:
+        return loss.detach().new_tensor(0.0)
+    return torch.stack(squared).sum().sqrt()
+
+
+def _gradient_consistency(per_sample_loss, optimizer):
+    """Scale-invariant gradient agreement across two reliable batch halves."""
+    if per_sample_loss is None or per_sample_loss.numel() < 4:
+        return per_sample_loss.detach().new_tensor(0.0)
+    first_loss = per_sample_loss[::2].mean()
+    second_loss = per_sample_loss[1::2].mean()
+    params = [
+        p for group in optimizer.param_groups for p in group['params']
+        if p.requires_grad
+    ]
+    first_grads = torch.autograd.grad(
+        first_loss, params, retain_graph=True, allow_unused=True
+    )
+    second_grads = torch.autograd.grad(
+        second_loss, params, retain_graph=True, allow_unused=True
+    )
+    dot = first_loss.detach().new_tensor(0.0, dtype=torch.float32)
+    first_sq = dot.clone()
+    second_sq = dot.clone()
+    for first_grad, second_grad in zip(first_grads, second_grads):
+        if first_grad is None or second_grad is None:
+            continue
+        first_float = first_grad.detach().float()
+        second_float = second_grad.detach().float()
+        dot = dot + (first_float * second_float).sum()
+        first_sq = first_sq + first_float.pow(2).sum()
+        second_sq = second_sq + second_float.pow(2).sum()
+    first_norm = first_sq.sqrt()
+    second_norm = second_sq.sqrt()
+    cosine = dot / (first_norm * second_norm + 1e-12)
+    norm_balance = (
+        2.0 * torch.minimum(first_norm, second_norm)
+        / (first_norm + second_norm + 1e-12)
+    )
+    return cosine.clamp(0.0, 1.0) * norm_balance.clamp(0.0, 1.0)
 
 
 def copy_model_and_optimizer(model, optimizer):

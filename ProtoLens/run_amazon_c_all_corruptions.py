@@ -468,7 +468,9 @@ def evaluate_tta_method(tta_model, dataloader, device, method_name="TTA",
         result_dict.update(pca_weighted_metrics)
         
         # Calibration
-        calibration_metrics = metrics_evaluator.compute_calibration(adapted_predictions, adapted_logits)
+        calibration_metrics = metrics_evaluator.compute_calibration(
+            adapted_predictions, adapted_logits, labels_tensor
+        )
         result_dict.update(calibration_metrics)
         
         # GT Class Contribution

@@ -80,10 +80,11 @@ class Cfg:
 cfg = Cfg()
 
 
-def setup_optimizer(params):
+def setup_optimizer(params, lr=None):
     """Set up optimizer for adaptation."""
+    effective_lr = cfg.OPTIM.LR if lr is None else lr
     if cfg.OPTIM.METHOD == 'Adam':
-        return torch.optim.Adam(params, lr=cfg.OPTIM.LR,
+        return torch.optim.Adam(params, lr=effective_lr,
                                betas=(cfg.OPTIM.BETA, 0.999),
                                weight_decay=cfg.OPTIM.WD)
     else:
@@ -114,10 +115,20 @@ def setup_proto_entropy(model, use_importance=False, use_confidence=False,
                         adaptive_lambda_strategy='relative_reliability',
                         adaptive_delta0=0.25,
                         adaptive_topk=3,
+                        router_min_consistency=0.25,
                         lambda_ema_momentum=0.9,
                         lambda_min=0.05,
                         lambda_max=0.95,
-                        record_diagnostics=False):
+                        record_diagnostics=False,
+                        samplewise_lambda=False,
+                        optimizer_lr=None,
+                        semantic_prototype_weights=None,
+                        compatibility_student=None,
+                        compatibility_floor=0.25,
+                        semantic_logit_blend=0.0,
+                        semantic_fusion='fixed',
+                        semantic_contrast_weight=0.0,
+                        semantic_temperature=0.25):
     """Set up Prototype Entropy adaptation (without threshold).
     
     Args:
@@ -140,7 +151,7 @@ def setup_proto_entropy(model, use_importance=False, use_confidence=False,
     model = proto_entropy.configure_model(model, adaptation_mode=adaptation_mode)
     params, param_names = proto_entropy.collect_params(model, adaptation_mode=adaptation_mode)
     
-    optimizer = setup_optimizer(params)
+    optimizer = setup_optimizer(params, lr=optimizer_lr)
     proto_model = proto_entropy.ProtoEntropy(
         model,
         optimizer,
@@ -167,10 +178,19 @@ def setup_proto_entropy(model, use_importance=False, use_confidence=False,
         adaptive_lambda_strategy=adaptive_lambda_strategy,
         adaptive_delta0=adaptive_delta0,
         adaptive_topk=adaptive_topk,
+        router_min_consistency=router_min_consistency,
         lambda_ema_momentum=lambda_ema_momentum,
         lambda_min=lambda_min,
         lambda_max=lambda_max,
         record_diagnostics=record_diagnostics,
+        samplewise_lambda=samplewise_lambda,
+        semantic_prototype_weights=semantic_prototype_weights,
+        compatibility_student=compatibility_student,
+        compatibility_floor=compatibility_floor,
+        semantic_logit_blend=semantic_logit_blend,
+        semantic_fusion=semantic_fusion,
+        semantic_contrast_weight=semantic_contrast_weight,
+        semantic_temperature=semantic_temperature,
     )
     return proto_model
 
@@ -201,6 +221,51 @@ def setup_sar(model):
     return sar_adapt.SAR(model, optimizer, steps=cfg.OPTIM.STEPS, episodic=cfg.MODEL.EPISODIC)
 
 
+def _loader_sample_ids(loader):
+    """Return class-relative file names in the exact DataLoader iteration order."""
+    dataset = loader.dataset
+    if isinstance(dataset, torch.utils.data.Subset):
+        base = dataset.dataset
+        indices = dataset.indices
+    else:
+        base = dataset
+        indices = range(len(dataset))
+    if not hasattr(base, 'samples') or not hasattr(base, 'root'):
+        raise RuntimeError("Paired metrics require a file-backed dataset with stable sample IDs")
+    root = Path(base.root)
+    return [Path(base.samples[index][0]).relative_to(root).as_posix() for index in indices]
+
+
+def _output_logits(outputs):
+    return outputs[0] if isinstance(outputs, tuple) else outputs
+
+
+def _find_matching_raw_output(raw_outputs, logits):
+    """Find the backbone forward whose logits are exactly those returned by TTA."""
+    for raw in reversed(raw_outputs):
+        raw_logits = _output_logits(raw)
+        if not isinstance(raw_logits, torch.Tensor):
+            continue
+        if raw_logits is logits:
+            return raw
+        if (raw_logits.shape == logits.shape and raw_logits.device == logits.device
+                and raw_logits.data_ptr() == logits.data_ptr()):
+            return raw
+    raise RuntimeError(
+        "Could not match returned predictions to a backbone forward; refusing to "
+        "compute Table-3 metrics from a different checkpoint/pass"
+    )
+
+
+def _protovit_activations(raw_outputs):
+    if not isinstance(raw_outputs, tuple) or len(raw_outputs) < 3:
+        raise RuntimeError("Expected ProtoViT output tuple (logits, distances, similarities)")
+    similarities = raw_outputs[2]
+    if similarities.dim() == 3:
+        return similarities.sum(dim=2)
+    return similarities
+
+
 def evaluate_model(model, loader, description="Inference", verbose=True, 
                    proto_evaluator=None, compute_proto_metrics=False,
                    efficiency_tracker=None):
@@ -212,67 +277,71 @@ def evaluate_model(model, loader, description="Inference", verbose=True,
     if verbose:
         print(f'\n{description}...')
     
-    # If efficiency tracking is enabled, do custom evaluation loop for per-batch timing
-    if efficiency_tracker is not None:
-        # Custom evaluation with per-batch timing
-        model.eval()
-        n_examples = 0
-        n_correct = 0
-        
-        for batch_idx, (images, labels) in enumerate(loader):
-            images = images.cuda()
-            labels = labels.cuda()
+    # A single online pass supplies both accuracy and every Table-3 metric.  A
+    # hook records the exact backbone output that produced the returned logits,
+    # so online TTA is never replayed from its final checkpoint.
+    model.eval()
+    actual_model = model.model if hasattr(model, 'model') else model
+    raw_outputs = []
+    hook = None
+    if compute_proto_metrics and proto_evaluator is not None:
+        hook = actual_model.register_forward_hook(
+            lambda _module, _inputs, output: raw_outputs.append(output)
+        )
+
+    all_logits, all_predictions, all_labels, all_activations = [], [], [], []
+    n_examples = 0
+    n_correct = 0
+    try:
+        for images, labels in loader:
+            images = images.to(next(actual_model.parameters()).device)
+            labels = labels.to(images.device)
             batch_size = labels.size(0)
-            
-            # Track this batch
-            with efficiency_tracker.track_inference(batch_size):
+            raw_outputs.clear()
+
+            if efficiency_tracker is not None:
+                with efficiency_tracker.track_inference(batch_size):
+                    with torch.no_grad():
+                        outputs = model(images)
+            else:
                 with torch.no_grad():
                     outputs = model(images)
-                    
-                    # Get predictions - handle both tuple and single output
-                    if isinstance(outputs, tuple):
-                        logits = outputs[0]
-                    else:
-                        logits = outputs
-                    
-                    _, predicted = logits.max(1)
-                    batch_correct = predicted.eq(labels).sum().item()
-                    
-                    n_correct += batch_correct
-                    n_examples += batch_size
-        
-        accu = n_correct / n_examples
-        if verbose:
-            print(f'Accuracy: {accu*100:.2f}%')
-    else:
-        # Standard evaluation (no per-batch timing)
-        class_specific = True
-        accu, test_loss_dict = tnt.test(
-            model=model, 
-            dataloader=loader,
-            class_specific=class_specific,
-            log=print if verbose else lambda x: None,
-            clst_k=k,
-            sum_cls=sum_cls
-        )
-        
-        if verbose:
-            print(f'Accuracy: {accu*100:.2f}%')
-    
-    # Optionally compute prototype metrics
+
+            logits = _output_logits(outputs)
+            predicted = logits.argmax(dim=1)
+            n_correct += predicted.eq(labels).sum().item()
+            n_examples += batch_size
+
+            if compute_proto_metrics and proto_evaluator is not None:
+                raw = _find_matching_raw_output(raw_outputs, logits)
+                activations = _protovit_activations(raw)
+                all_activations.append(activations.detach().cpu())
+                all_logits.append(logits.detach().cpu())
+                all_predictions.append(predicted.detach().cpu())
+                all_labels.append(labels.detach().cpu())
+    finally:
+        if hook is not None:
+            hook.remove()
+
+    accu = n_correct / max(n_examples, 1)
+    if verbose:
+        print(f'Accuracy: {accu*100:.2f}%')
+
     proto_metrics = {}
     if compute_proto_metrics and proto_evaluator is not None:
         if verbose:
             print('Computing prototype-based metrics...')
         if isinstance(proto_evaluator, EnhancedPrototypeMetrics):
-            proto_metrics = proto_evaluator.evaluate_tta_method_enhanced(
-                model, loader, top_k=10, max_samples=None, verbose=False,
-                track_adaptation_rate=True
+            proto_metrics = proto_evaluator.evaluate_collected_outputs(
+                torch.cat(all_activations), torch.cat(all_logits),
+                torch.cat(all_predictions), torch.cat(all_labels), top_k=10
             )
         else:
-            proto_metrics = proto_evaluator.evaluate_tta_method(
-                model, loader, top_k=10, max_samples=None, verbose=False
-            )
+            activations = torch.cat(all_activations)
+            labels = torch.cat(all_labels)
+            proto_metrics.update(proto_evaluator.compute_prototype_activation_consistency(activations))
+            proto_metrics.update(proto_evaluator.compute_prototype_class_alignment(activations, labels, top_k=10))
+            proto_metrics.update(proto_evaluator.compute_prototype_activation_sparsity(activations))
         if verbose:
             print(f'  PAC: {proto_metrics.get("PAC_mean", 0)*100:.2f}%')
             print(f'  PCA: {proto_metrics.get("PCA_mean", 0)*100:.2f}%')
@@ -401,6 +470,21 @@ def evaluate_single_combination(model_path, corruption_type, severity, data_dir,
             loader = load_dataset_with_corruption(clean_data_dir, corruption_type, severity, batch_size)
         else:
             loader = load_corrupted_dataset(data_dir, corruption_type, severity, batch_size)
+        if compute_proto_metrics and proto_evaluator is not None:
+            clean_ids = getattr(proto_evaluator, 'clean_sample_ids', None)
+            corrupt_ids = _loader_sample_ids(loader)
+            if clean_ids is None:
+                raise RuntimeError("Clean sample IDs were not recorded for paired metrics")
+            if clean_ids != corrupt_ids:
+                mismatch = next(
+                    (i for i, pair in enumerate(zip(clean_ids, corrupt_ids)) if pair[0] != pair[1]),
+                    min(len(clean_ids), len(corrupt_ids)),
+                )
+                raise RuntimeError(
+                    "Clean/corrupted sample IDs are not paired: "
+                    f"clean_n={len(clean_ids)}, corrupt_n={len(corrupt_ids)}, "
+                    f"first_mismatch={mismatch}"
+                )
     except Exception as e:
         logger.error(f"Failed to load data for {corruption_type}-{severity}: {e}")
         return None
@@ -417,11 +501,11 @@ def evaluate_single_combination(model_path, corruption_type, severity, data_dir,
         elif mode_name == 'tent':
             eval_model = setup_tent(base_model)
         elif mode_name.startswith('proto_imp_conf'):
-            # ProtoEntropy with Importance+Confidence
+            # ProtoEntropy with canonical or explicitly ablated weighting.
             eval_model = setup_proto_entropy(
                 base_model,
-                use_importance=True,
-                use_confidence=True,
+                use_importance=mode_config.get('use_importance', True),
+                use_confidence=mode_config.get('use_confidence', True),
                 reset_mode=mode_config.get('reset_mode', None),
                 reset_frequency=mode_config.get('reset_frequency', 10),
                 confidence_threshold=mode_config.get('confidence_threshold', 0.7),
@@ -434,6 +518,7 @@ def evaluate_single_combination(model_path, corruption_type, severity, data_dir,
                 use_ensemble_entropy=mode_config.get('use_ensemble_entropy', False),
                 source_proto_stats=mode_config.get('source_proto_stats', None),
                 alpha_source_kl=mode_config.get('alpha_source_kl', 0.0),
+                adapt_all_prototypes=mode_config.get('adapt_all_prototypes', False),
                 logit_weight=mode_config.get('logit_weight', 0.0),
                 shared_confidence_weighting=mode_config.get('shared_confidence_weighting', False),
                 gradient_normalize=mode_config.get('gradient_normalize', False),
@@ -441,10 +526,13 @@ def evaluate_single_combination(model_path, corruption_type, severity, data_dir,
                 adaptive_lambda_strategy=mode_config.get('adaptive_lambda_strategy', 'relative_reliability'),
                 adaptive_delta0=mode_config.get('adaptive_delta0', 0.25),
                 adaptive_topk=mode_config.get('adaptive_topk', 3),
+                router_min_consistency=mode_config.get('router_min_consistency', 0.25),
                 lambda_ema_momentum=mode_config.get('lambda_ema_momentum', 0.9),
                 lambda_min=mode_config.get('lambda_min', 0.05),
                 lambda_max=mode_config.get('lambda_max', 0.95),
                 record_diagnostics=mode_config.get('record_diagnostics', False),
+                samplewise_lambda=mode_config.get('samplewise_lambda', False),
+                optimizer_lr=mode_config.get('optimizer_lr', None),
             )
             
             # Reset geo filter stats if applicable
@@ -534,6 +622,13 @@ def evaluate_single_combination(model_path, corruption_type, severity, data_dir,
                     'gt_class_contrib_improvement': proto_metrics.get('gt_class_contrib_improvement'),
                     'gt_class_contrib_change_mean': proto_metrics.get('gt_class_contrib_change_mean'),
                 })
+            for audit_key in (
+                'paired_num_samples', 'clean_accuracy_reference',
+                'stability_bound_lower', 'stability_bound_upper',
+                'stability_bounds_passed',
+            ):
+                if audit_key in proto_metrics:
+                    result[audit_key] = proto_metrics[audit_key]
             if 'adaptation_rate' in proto_metrics:
                 result.update({
                     'adaptation_rate': proto_metrics.get('adaptation_rate'),
@@ -636,12 +731,36 @@ def main():
                         help='Normalize component losses by their gradient norms')
     parser.add_argument('--proto-lambda-ema-momentum', type=float, default=0.9)
     parser.add_argument('--proto-adaptive-strategy', default='relative_reliability',
-                        choices=['relative_reliability', 'activation_margin'])
+                       choices=['relative_reliability', 'activation_margin',
+                                'relative_evidence', 'gradient_consistency',
+                                'source_free_router',
+                                'source_free_router_absolute',
+                                'source_free_router_coverage',
+                                'source_free_router_coverage_absolute'])
     parser.add_argument('--proto-adaptive-delta0', type=float, default=0.25)
     parser.add_argument('--proto-adaptive-topk', type=int, default=3)
+    parser.add_argument('--proto-router-min-consistency', type=float, default=0.25,
+                        help='Absolute [0,1] prototype-gradient consistency floor for the absolute router')
+    parser.add_argument('--proto-lr', type=float, default=None,
+                        help='ProtoTTA optimizer learning rate (default: canonical 1e-3)')
     parser.add_argument('--proto-lambda-min', type=float, default=0.05)
     parser.add_argument('--proto-lambda-max', type=float, default=0.95)
     parser.add_argument('--proto-record-diagnostics', action='store_true')
+    # Component-ablation controls. Defaults reproduce the canonical main-table
+    # adaptive configuration exactly; each flag changes only its named factor.
+    parser.add_argument('--proto-disable-geometric-filter', action='store_true',
+                        help='Disable the canonical geometric reliability filter')
+    parser.add_argument('--proto-consensus-strategy', default='top_k_mean',
+                        choices=['max', 'mean', 'median', 'top_k_mean', 'weighted_mean'])
+    parser.add_argument('--proto-adaptation-mode', default='layernorm_attn_bias',
+                        choices=['layernorm_only', 'layernorm_attn_bias',
+                                 'all_adaptive', 'all_parameters'])
+    parser.add_argument('--proto-adapt-all-prototypes', action='store_true',
+                        help='Apply the prototype objective to all rather than pseudo-label prototypes')
+    parser.add_argument('--proto-disable-importance-weighting', action='store_true',
+                        help='Use uniform rather than classifier-importance prototype weights')
+    parser.add_argument('--proto-disable-confidence-weighting', action='store_true',
+                        help='Disable sample-confidence weighting in both loss components')
 
     args = parser.parse_args()
     if not 0.0 <= args.proto_lambda <= 1.0:
@@ -650,6 +769,10 @@ def main():
         parser.error('Require 0 <= --proto-lambda-min <= --proto-lambda-max <= 1')
     if args.proto_adaptive_delta0 <= 0 or args.proto_adaptive_topk < 1:
         parser.error('--proto-adaptive-delta0 must be > 0 and --proto-adaptive-topk >= 1')
+    if not 0.0 <= args.proto_router_min_consistency <= 1.0:
+        parser.error('--proto-router-min-consistency must be in [0,1]')
+    if args.proto_lr is not None and args.proto_lr <= 0:
+        parser.error('--proto-lr must be positive')
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     
     # Setup device
@@ -685,10 +808,10 @@ def main():
     # proto_imp_conf has 3 variations
     _logit_w = 1.0 - args.proto_lambda
     proto_common = {
-        'use_geometric_filter': True,
+        'use_geometric_filter': not args.proto_disable_geometric_filter,
         'geo_filter_threshold': 0.92,
-        'consensus_strategy': 'top_k_mean',
-        'adaptation_mode': 'layernorm_attn_bias',
+        'consensus_strategy': args.proto_consensus_strategy,
+        'adaptation_mode': args.proto_adaptation_mode,
         'use_ensemble_entropy': False,
         'reset_mode': None,
         'reset_frequency': 10,
@@ -701,9 +824,14 @@ def main():
         'adaptive_lambda_strategy': args.proto_adaptive_strategy,
         'adaptive_delta0': args.proto_adaptive_delta0,
         'adaptive_topk': args.proto_adaptive_topk,
+        'router_min_consistency': args.proto_router_min_consistency,
+        'optimizer_lr': args.proto_lr,
         'lambda_min': args.proto_lambda_min,
         'lambda_max': args.proto_lambda_max,
         'record_diagnostics': args.proto_record_diagnostics,
+        'adapt_all_prototypes': args.proto_adapt_all_prototypes,
+        'use_importance': not args.proto_disable_importance_weighting,
+        'use_confidence': not args.proto_disable_confidence_weighting,
     }
     modes = {
         'normal': {},
@@ -742,6 +870,58 @@ def main():
             **proto_common,
             'logit_weight': 0.5,
             'adaptive_lambda': True,
+        },
+        'proto_imp_conf_adaptive_samplewise': {
+            **proto_common,
+            'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'samplewise_lambda': True,
+        },
+        'proto_imp_conf_adaptive_relative_evidence': {
+            **proto_common,
+            'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'adaptive_lambda_strategy': 'relative_evidence',
+            'samplewise_lambda': True,
+        },
+        'proto_imp_conf_adaptive_gradient_consistency': {
+            **proto_common,
+            'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'adaptive_lambda_strategy': 'gradient_consistency',
+            'gradient_normalize': True,
+        },
+        'proto_imp_conf_adaptive_source_free_router': {
+            **proto_common,
+            'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'adaptive_lambda_strategy': 'source_free_router',
+            'samplewise_lambda': True,
+            'gradient_normalize': True,
+        },
+        'proto_imp_conf_adaptive_source_free_router_absolute': {
+            **proto_common,
+            'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'adaptive_lambda_strategy': 'source_free_router_absolute',
+            'samplewise_lambda': True,
+            'gradient_normalize': True,
+        },
+        'proto_imp_conf_adaptive_source_free_router_coverage': {
+            **proto_common,
+            'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'adaptive_lambda_strategy': 'source_free_router_coverage',
+            'samplewise_lambda': True,
+            'gradient_normalize': True,
+        },
+        'proto_imp_conf_adaptive_source_free_router_coverage_absolute': {
+            **proto_common,
+            'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'adaptive_lambda_strategy': 'source_free_router_coverage_absolute',
+            'samplewise_lambda': True,
+            'gradient_normalize': True,
         },
         'loss': {},
         'eata': {},
@@ -838,6 +1018,7 @@ def main():
                 max_samples=args.proto_baseline_samples, 
                 verbose=True
             )
+        proto_evaluator.clean_sample_ids = _loader_sample_ids(clean_loader)
         
         print(f"✓ Prototype evaluator ready")
         print("="*80)

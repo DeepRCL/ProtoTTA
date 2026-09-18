@@ -88,6 +88,21 @@ def _build_test_subset_dataset(clean_dir, transform):
     return torch.utils.data.Subset(dataset, indices)
 
 
+def _loader_sample_ids(loader):
+    """Return class-relative file names in exact DataLoader iteration order."""
+    dataset = loader.dataset
+    if isinstance(dataset, torch.utils.data.Subset):
+        base = dataset.dataset
+        indices = dataset.indices
+    else:
+        base = dataset
+        indices = range(len(dataset))
+    if not hasattr(base, 'samples') or not hasattr(base, 'root'):
+        raise RuntimeError("Paired metrics require a file-backed dataset with stable sample IDs")
+    root = Path(base.root)
+    return [Path(base.samples[index][0]).relative_to(root).as_posix() for index in indices]
+
+
 def load_model(model_path, device):
     ckpt = torch.load(model_path, map_location='cpu', weights_only=False)
     if isinstance(ckpt, torch.nn.Module):
@@ -158,30 +173,85 @@ def load_on_the_fly(clean_dir, corruption_type, severity, batch_size, num_worker
     )
 
 
-def evaluate_model(model, loader, device, description='Eval', verbose=True, efficiency_tracker=None):
+def _output_logits(outputs):
+    return outputs[0] if isinstance(outputs, tuple) else outputs
+
+
+def _find_matching_raw_output(raw_outputs, logits):
+    for raw in reversed(raw_outputs):
+        raw_logits = _output_logits(raw)
+        if not isinstance(raw_logits, torch.Tensor):
+            continue
+        if raw_logits is logits:
+            return raw
+        if (raw_logits.shape == logits.shape and raw_logits.device == logits.device
+                and raw_logits.data_ptr() == logits.data_ptr()):
+            return raw
+    raise RuntimeError(
+        "Could not match returned predictions to a backbone forward; refusing to "
+        "compute Table-3 metrics from a different checkpoint/pass"
+    )
+
+
+def evaluate_model(model, loader, device, description='Eval', verbose=True,
+                   efficiency_tracker=None, proto_evaluator=None,
+                   compute_proto_metrics=False):
     if verbose:
         print(f'\n{description}...')
 
     n_correct = 0
     n_total = 0
-    for images, labels in loader:
-        images = images.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-        batch_size = labels.size(0)
+    actual_model = model.model if hasattr(model, 'model') else model
+    raw_outputs = []
+    hook = None
+    if compute_proto_metrics and proto_evaluator is not None:
+        hook = actual_model.register_forward_hook(
+            lambda _module, _inputs, output: raw_outputs.append(output)
+        )
+    all_activations, all_logits, all_predictions, all_labels = [], [], [], []
+    try:
+        for images, labels in loader:
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            batch_size = labels.size(0)
+            raw_outputs.clear()
 
-        context = efficiency_tracker.track_inference(batch_size) if efficiency_tracker else nullcontext()
-        with context:
-            outputs = model(images)
-            logits = outputs[0] if isinstance(outputs, tuple) else outputs
-            preds = logits.argmax(dim=1)
+            context = efficiency_tracker.track_inference(batch_size) if efficiency_tracker else nullcontext()
+            with context:
+                outputs = model(images)
+                logits = _output_logits(outputs)
+                preds = logits.argmax(dim=1)
 
-        n_correct += preds.eq(labels).sum().item()
-        n_total += batch_size
+            n_correct += preds.eq(labels).sum().item()
+            n_total += batch_size
+            if compute_proto_metrics and proto_evaluator is not None:
+                raw = _find_matching_raw_output(raw_outputs, logits)
+                activations = proto_evaluator._extract_prototype_activations(model, raw)
+                all_activations.append(activations.detach().cpu())
+                all_logits.append(logits.detach().cpu())
+                all_predictions.append(preds.detach().cpu())
+                all_labels.append(labels.detach().cpu())
+    finally:
+        if hook is not None:
+            hook.remove()
 
     accuracy = n_correct / max(n_total, 1)
     if verbose:
         print(f'Accuracy: {accuracy*100:.2f}%')
-    return accuracy
+    proto_metrics = {}
+    if compute_proto_metrics and proto_evaluator is not None:
+        activations = torch.cat(all_activations)
+        labels = torch.cat(all_labels)
+        if isinstance(proto_evaluator, EnhancedPrototypeMetrics):
+            proto_metrics = proto_evaluator.evaluate_collected_outputs(
+                activations, torch.cat(all_logits),
+                torch.cat(all_predictions), labels, top_k=10
+            )
+        else:
+            proto_metrics.update(proto_evaluator.compute_prototype_activation_consistency(activations))
+            proto_metrics.update(proto_evaluator.compute_prototype_class_alignment(activations, labels, top_k=10))
+            proto_metrics.update(proto_evaluator.compute_prototype_activation_sparsity(activations))
+    return accuracy, proto_metrics
 
 
 class nullcontext:
@@ -255,6 +325,7 @@ def setup_method(model, mode_name, mode_config, device, model_path, loader, fish
             adaptive_lambda_strategy=mode_config.get('adaptive_lambda_strategy', 'relative_reliability'),
             adaptive_delta0=mode_config.get('adaptive_delta0', 0.25),
             adaptive_topk=mode_config.get('adaptive_topk', 3),
+            router_min_consistency=mode_config.get('router_min_consistency', 0.25),
             lambda_ema_momentum=mode_config.get('lambda_ema_momentum', 0.9),
             lambda_min=mode_config.get('lambda_min', 0.05),
             lambda_max=mode_config.get('lambda_max', 0.95),
@@ -263,6 +334,9 @@ def setup_method(model, mode_name, mode_config, device, model_path, loader, fish
             lambda_search_radius=mode_config.get('lambda_search_radius', 0.1),
             lambda_search_teacher_temp=mode_config.get('lambda_search_teacher_temp', 0.5),
             lambda_search_min_improvement=mode_config.get('lambda_search_min_improvement', 0.0),
+            samplewise_lambda=mode_config.get('samplewise_lambda', False),
+            adaptive_branch_weighting=mode_config.get('adaptive_branch_weighting', False),
+            branch_weight_floor=mode_config.get('branch_weight_floor', 0.1),
             model_mode=mode_config.get('model_mode', 'train'),
             reset_mode=mode_config.get('reset_mode', None),
             reset_frequency=mode_config.get('reset_frequency', 10),
@@ -302,6 +376,21 @@ def evaluate_single_combination(
         ) if on_the_fly else load_corrupted_dataset(
             data_dir, corruption_type, severity, loader_batch_size, num_workers
         )
+        if compute_proto_metrics and proto_evaluator is not None:
+            clean_ids = getattr(proto_evaluator, 'clean_sample_ids', None)
+            corrupt_ids = _loader_sample_ids(loader)
+            if clean_ids is None:
+                raise RuntimeError("Clean sample IDs were not recorded for paired metrics")
+            if clean_ids != corrupt_ids:
+                mismatch = next(
+                    (i for i, pair in enumerate(zip(clean_ids, corrupt_ids)) if pair[0] != pair[1]),
+                    min(len(clean_ids), len(corrupt_ids)),
+                )
+                raise RuntimeError(
+                    "Clean/corrupted sample IDs are not paired: "
+                    f"clean_n={len(clean_ids)}, corrupt_n={len(corrupt_ids)}, "
+                    f"first_mismatch={mismatch}"
+                )
 
         base_model = load_model(model_path, device)
         eval_model = setup_method(base_model, mode_name, mode_config, device, model_path, loader, fishers=fishers)
@@ -311,9 +400,11 @@ def evaluate_single_combination(
             adapted_params = [] if mode_name == 'normal' else [p for p in actual_model.parameters() if p.requires_grad]
             efficiency_tracker.count_adapted_parameters(actual_model, adapted_params)
 
-        accuracy = evaluate_model(
+        accuracy, proto_metrics = evaluate_model(
             eval_model, loader, device, description=f'{mode_name} / {corruption_type}-{severity}',
-            verbose=False, efficiency_tracker=efficiency_tracker
+            verbose=False, efficiency_tracker=efficiency_tracker,
+            proto_evaluator=proto_evaluator,
+            compute_proto_metrics=compute_proto_metrics,
         )
 
         if efficiency_tracker and mode_name != 'normal':
@@ -321,14 +412,6 @@ def evaluate_single_combination(
 
         result = {'accuracy': float(accuracy)}
         if compute_proto_metrics and proto_evaluator is not None:
-            if isinstance(proto_evaluator, EnhancedPrototypeMetrics):
-                proto_metrics = proto_evaluator.evaluate_tta_method_enhanced(
-                    eval_model, loader, top_k=10, max_samples=None, verbose=False, track_adaptation_rate=True
-                )
-            else:
-                proto_metrics = proto_evaluator.evaluate_tta_method(
-                    eval_model, loader, top_k=10, max_samples=None, verbose=False
-                )
             keys = [
                 'PAC_mean', 'PAC_std', 'PCA_mean', 'PCA_std',
                 'sparsity_gini_mean', 'sparsity_active_mean',
@@ -336,6 +419,9 @@ def evaluate_single_combination(
                 'calibration_agreement', 'calibration_logit_corr',
                 'gt_class_contrib_improvement', 'gt_class_contrib_change_mean',
                 'adaptation_rate', 'avg_updates_per_sample',
+                'paired_num_samples', 'clean_accuracy_reference',
+                'stability_bound_lower', 'stability_bound_upper',
+                'stability_bounds_passed',
             ]
             for key in keys:
                 if key in proto_metrics:
@@ -421,6 +507,7 @@ def build_run_config(args, selected_modes, corruptions, clean_dir):
         'proto_lambda_search_radius': args.proto_lambda_search_radius,
         'proto_lambda_search_teacher_temp': args.proto_lambda_search_teacher_temp,
         'proto_lambda_search_min_improvement': args.proto_lambda_search_min_improvement,
+        'proto_branch_weight_floor': args.proto_branch_weight_floor,
         'prototype_metrics': args.prototype_metrics,
         'proto_baseline_samples': args.proto_baseline_samples,
         'use_enhanced_metrics': args.use_enhanced_metrics,
@@ -544,9 +631,18 @@ def main():
                         help='Normalize each loss by its gradient norm before interpolation')
     parser.add_argument('--proto_lambda_ema_momentum', type=float, default=0.9)
     parser.add_argument('--proto_adaptive_strategy', default='relative_reliability',
-                        choices=['relative_reliability', 'activation_margin'])
+                        choices=['relative_reliability', 'activation_margin',
+                                 'relative_evidence', 'gradient_consistency',
+                                 'source_free_router',
+                                 'source_free_router_absolute',
+                                 'source_free_router_evidence',
+                                 'source_free_router_coverage',
+                                 'source_free_router_coverage_absolute',
+                                 'source_free_router_coverage_ema'])
     parser.add_argument('--proto_adaptive_delta0', type=float, default=0.25)
     parser.add_argument('--proto_adaptive_topk', type=int, default=3)
+    parser.add_argument('--proto_router_min_consistency', type=float, default=0.25,
+                        help='Absolute [0,1] prototype-gradient consistency floor for the absolute router')
     parser.add_argument('--proto_lambda_min', type=float, default=0.05)
     parser.add_argument('--proto_lambda_max', type=float, default=0.95)
     parser.add_argument('--proto_record_diagnostics', action='store_true',
@@ -557,6 +653,8 @@ def main():
                         help='Temperature used to sharpen the frozen teacher in label-free search')
     parser.add_argument('--proto_lambda_search_min_improvement', type=float, default=0.0,
                         help='Minimum held-out consistency improvement required to commit an update')
+    parser.add_argument('--proto_branch_weight_floor', type=float, default=0.1,
+                        help='Minimum local/global weight in adaptive branch experiments')
     args = parser.parse_args()
 
     if not 0.0 <= args.proto_lambda <= 1.0:
@@ -565,12 +663,16 @@ def main():
         parser.error('Require 0 <= --proto_lambda_min <= --proto_lambda_max <= 1')
     if args.proto_adaptive_delta0 <= 0 or args.proto_adaptive_topk < 1:
         parser.error('--proto_adaptive_delta0 must be > 0 and --proto_adaptive_topk >= 1')
+    if not 0.0 <= args.proto_router_min_consistency <= 1.0:
+        parser.error('--proto_router_min_consistency must be in [0,1]')
     if args.proto_lambda_search_radius < 0:
         parser.error('--proto_lambda_search_radius must be non-negative')
     if args.proto_lambda_search_teacher_temp <= 0:
         parser.error('--proto_lambda_search_teacher_temp must be positive')
     if args.proto_lambda_search_min_improvement < 0:
         parser.error('--proto_lambda_search_min_improvement must be non-negative')
+    if not 0.0 <= args.proto_branch_weight_floor <= 0.5:
+        parser.error('--proto_branch_weight_floor must be in [0, 0.5]')
     if args.memo_lr <= 0 or args.memo_views < 1 or args.memo_steps < 1:
         parser.error('MEMO requires positive lr, views, and steps')
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
@@ -602,11 +704,13 @@ def main():
         'adaptive_lambda_strategy': args.proto_adaptive_strategy,
         'adaptive_delta0': args.proto_adaptive_delta0,
         'adaptive_topk': args.proto_adaptive_topk,
+        'router_min_consistency': args.proto_router_min_consistency,
         'lambda_min': args.proto_lambda_min, 'lambda_max': args.proto_lambda_max,
         'record_diagnostics': args.proto_record_diagnostics,
         'lambda_search_radius': args.proto_lambda_search_radius,
         'lambda_search_teacher_temp': args.proto_lambda_search_teacher_temp,
         'lambda_search_min_improvement': args.proto_lambda_search_min_improvement,
+        'branch_weight_floor': args.proto_branch_weight_floor,
         'model_mode': args.adapt_model_mode,
     }
     modes = {
@@ -656,6 +760,87 @@ def main():
             'adaptive_lambda': True,
             'lambda_search': True,
         },
+        'proto_tta_adaptive_samplewise': {
+            **proto_common,
+            'proto_weight': 0.5, 'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'samplewise_lambda': True,
+        },
+        'proto_tta_adaptive_relative_evidence': {
+            **proto_common,
+            'proto_weight': 0.5, 'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'adaptive_lambda_strategy': 'relative_evidence',
+            'samplewise_lambda': True,
+        },
+        'proto_tta_adaptive_gradient_consistency': {
+            **proto_common,
+            'proto_weight': 0.5, 'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'adaptive_lambda_strategy': 'gradient_consistency',
+            'gradient_normalize': True,
+        },
+        'proto_tta_adaptive_source_free_router': {
+            **proto_common,
+            'proto_weight': 0.5, 'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'adaptive_lambda_strategy': 'source_free_router',
+            'samplewise_lambda': True,
+            'gradient_normalize': True,
+        },
+        'proto_tta_adaptive_source_free_router_absolute': {
+            **proto_common,
+            'proto_weight': 0.5, 'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'adaptive_lambda_strategy': 'source_free_router_absolute',
+            'samplewise_lambda': True,
+            'gradient_normalize': True,
+        },
+        'proto_tta_adaptive_source_free_router_evidence': {
+            **proto_common,
+            'proto_weight': 0.5, 'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'adaptive_lambda_strategy': 'source_free_router_evidence',
+            'samplewise_lambda': True,
+            'gradient_normalize': True,
+        },
+        'proto_tta_adaptive_source_free_router_coverage': {
+            **proto_common,
+            'proto_weight': 0.5, 'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'adaptive_lambda_strategy': 'source_free_router_coverage',
+            'samplewise_lambda': True,
+            'gradient_normalize': True,
+        },
+        'proto_tta_adaptive_source_free_router_coverage_absolute': {
+            **proto_common,
+            'proto_weight': 0.5, 'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'adaptive_lambda_strategy': 'source_free_router_coverage_absolute',
+            'samplewise_lambda': True,
+            'gradient_normalize': True,
+        },
+        'proto_tta_adaptive_source_free_router_coverage_ema': {
+            **proto_common,
+            'proto_weight': 0.5, 'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'adaptive_lambda_strategy': 'source_free_router_coverage_ema',
+            'samplewise_lambda': True,
+            'gradient_normalize': True,
+        },
+        'proto_tta_adaptive_branch': {
+            **proto_common,
+            'proto_weight': 0.5, 'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'adaptive_branch_weighting': True,
+        },
+        'proto_tta_adaptive_samplewise_branch': {
+            **proto_common,
+            'proto_weight': 0.5, 'logit_weight': 0.5,
+            'adaptive_lambda': True,
+            'samplewise_lambda': True,
+            'adaptive_branch_weighting': True,
+        },
     }
 
     if abs(args.proto_lambda - 0.7) < 1e-12:
@@ -689,6 +874,7 @@ def main():
             proto_evaluator.collect_clean_baseline_enhanced(clean_loader, max_samples=args.proto_baseline_samples, verbose=True)
         else:
             proto_evaluator.collect_clean_baseline(clean_loader, max_samples=args.proto_baseline_samples, verbose=True)
+        proto_evaluator.clean_sample_ids = _loader_sample_ids(clean_loader)
         del base_model
         torch.cuda.empty_cache()
 

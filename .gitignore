@@ -43,6 +43,7 @@ pip-log.txt
 Thumbs.db
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 *~
@@ -61,6 +62,7 @@ wandb/
 **/results/
 **/results-*/
 **/results_*/
+**/results*.json
 **/plots/
 **/plots-*/
 **/plots_*/
@@ -80,6 +82,10 @@ wandb/
 **/*.zip
 **/*.rar
 **/*.backup
+*.out
+*.err
+*.log
+*.done
 
 # -----------------------------------------------------------------------------
 # Generated evaluation artifacts
@@ -94,6 +100,38 @@ ProtoViT/plots_v1/
 ProtoViT/summary_stats-v1.json
 ProtoViT/robustness_results*.json
 ProtoPFormer/robustness_results*.json
+
+# Large VLM exports contain duplicated inputs, reasoning boards, private target
+# manifests, and completion markers.  Keep the pipeline code, not its runs.
+ProtoPNetVLM/vlm_prototta_*/
+ProtoPNetVLM/**/images/
+ProtoPNetVLM/**/boards/
+ProtoPNetVLM/**/sealed_targets.json
+ProtoPNetVLM/**/public.json
+ProtoPNetVLM/**/export.progress.json
+ProtoPNetVLM/**/export.complete.json
+
+# Local sweep outputs and paper work products
+/lambda_sweep_analysis/
+/paper/
+/paper_sweep_results/
+/protocol_results*/
+/paper_tables*.tex
+/ProtoViT/paper.tex
+/scripts/
+
+# Internal transfer notes and cluster submitters contain host-specific paths.
+/ProtoPNetVLM/PROTOPNET_VLM_TRANSFER.md
+/ProtoPNetVLM/VLM_PROTOTTA_EVALUATION.md
+/ProtoPNetVLM/submit_vlm_prototta_scoring_only.sh
+/ProtoPNetVLM/protopnet_tta/VISUALIZATION_README.md
+
+# Cluster-specific launchers are intentionally local.  Reproduction commands
+# belong in the README and the portable Python entry points.
+slurm_*.sh
+**/slurm_*.sh
+**/*.sbatch
+**/submit_*local.sh
 
 # -----------------------------------------------------------------------------
 # Paper drafts / unrelated PDFs

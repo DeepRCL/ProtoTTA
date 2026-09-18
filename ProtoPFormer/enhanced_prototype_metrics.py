@@ -28,11 +28,12 @@ class EnhancedPrototypeMetrics(PrototypeMetricsEvaluator):
 
         preds = []
         logits_list = []
+        labels_list = []
         n_samples = 0
         actual = self.ppnet
         actual.eval()
         with torch.no_grad():
-            for images, _ in clean_loader:
+            for images, labels in clean_loader:
                 if max_samples is not None and n_samples >= max_samples:
                     break
                 images = images.to(self.device)
@@ -40,6 +41,7 @@ class EnhancedPrototypeMetrics(PrototypeMetricsEvaluator):
                 logits = outputs[0] if isinstance(outputs, tuple) else outputs
                 logits_list.append(logits.cpu())
                 preds.append(logits.argmax(dim=1).cpu())
+                labels_list.append(labels.cpu())
                 n_samples += images.size(0)
 
         self.clean_predictions = torch.cat(preds)
@@ -47,6 +49,97 @@ class EnhancedPrototypeMetrics(PrototypeMetricsEvaluator):
         if max_samples is not None:
             self.clean_predictions = self.clean_predictions[:max_samples]
             self.clean_logits = self.clean_logits[:max_samples]
+        clean_labels = torch.cat(labels_list)
+        if max_samples is not None:
+            clean_labels = clean_labels[:max_samples]
+        if not torch.equal(clean_labels, self.clean_labels.cpu()):
+            raise RuntimeError("Clean prediction and prototype passes used different sample ordering")
+        self.clean_accuracy = float(
+            (self.clean_predictions == clean_labels).float().mean().item()
+        )
+
+    def evaluate_collected_outputs(
+        self,
+        activations: torch.Tensor,
+        logits: torch.Tensor,
+        predictions: torch.Tensor,
+        labels: torch.Tensor,
+        top_k: int = 10,
+    ) -> Dict[str, float]:
+        """Compute every Table-3 metric from the exact online prediction pass."""
+        lengths = {
+            'activations': len(activations), 'logits': len(logits),
+            'predictions': len(predictions), 'labels': len(labels),
+        }
+        if len(set(lengths.values())) != 1:
+            raise RuntimeError(f"Mismatched collected output lengths: {lengths}")
+        if self.clean_predictions is None or self.clean_logits is None:
+            raise RuntimeError("Clean prediction reference was not collected")
+        if self.clean_prototype_activations is None or self.clean_labels is None:
+            raise RuntimeError("Clean prototype reference was not collected")
+
+        n = len(labels)
+        clean_lengths = {
+            'clean activations': len(self.clean_prototype_activations),
+            'clean logits': len(self.clean_logits),
+            'clean predictions': len(self.clean_predictions),
+            'clean labels': len(self.clean_labels),
+        }
+        if any(value != n for value in clean_lengths.values()):
+            raise RuntimeError(
+                f"Clean/corrupted pairing requires exactly {n} samples; got {clean_lengths}"
+            )
+
+        activations = activations.cpu()
+        logits = logits.cpu()
+        predictions = predictions.cpu()
+        labels = labels.cpu()
+        if not torch.equal(labels, self.clean_labels.cpu()):
+            raise RuntimeError("Clean/corrupted labels or sample ordering do not match")
+
+        metrics = {}
+        metrics.update(self.compute_prototype_activation_consistency(activations))
+        metrics.update(self.compute_prototype_class_alignment(activations, labels, top_k=top_k))
+        metrics.update(self.compute_prototype_activation_sparsity(activations))
+        metrics.update(self.compute_pca_weighted_by_importance(activations, labels, top_k=top_k))
+
+        clean_predictions = self.clean_predictions.cpu()
+        clean_logits = self.clean_logits.cpu()
+        agreement = float((predictions == clean_predictions).float().mean().item())
+        logit_corr = float(F.cosine_similarity(logits, clean_logits, dim=1).mean().item())
+        clean_confs = F.softmax(clean_logits, dim=1).max(dim=1)[0]
+        corrupt_confs = F.softmax(logits, dim=1).max(dim=1)[0]
+        conf_corr = 0.0
+        if torch.std(clean_confs) > 1e-6 and torch.std(corrupt_confs) > 1e-6:
+            conf_corr = float(np.corrcoef(clean_confs.numpy(), corrupt_confs.numpy())[0, 1])
+        metrics.update({
+            'calibration_agreement': agreement,
+            'calibration_logit_corr': logit_corr,
+            'calibration_conf_corr': conf_corr,
+        })
+        metrics.update(self.compute_class_contribution_change(
+            self.clean_prototype_activations.cpu(), activations, labels
+        ))
+
+        clean_accuracy = float((clean_predictions == labels).float().mean().item())
+        corrupt_accuracy = float((predictions == labels).float().mean().item())
+        lower = max(0.0, clean_accuracy + corrupt_accuracy - 1.0)
+        upper = 1.0 - abs(clean_accuracy - corrupt_accuracy)
+        tolerance = 1.0 / max(n, 1) + 1e-7
+        if agreement < lower - tolerance or agreement > upper + tolerance:
+            raise RuntimeError(
+                "Prediction stability violates paired-accuracy bounds: "
+                f"clean={clean_accuracy:.6f}, corrupt={corrupt_accuracy:.6f}, "
+                f"stability={agreement:.6f}, allowed=[{lower:.6f}, {upper:.6f}]"
+            )
+        metrics.update({
+            'paired_num_samples': n,
+            'clean_accuracy_reference': clean_accuracy,
+            'stability_bound_lower': lower,
+            'stability_bound_upper': upper,
+            'stability_bounds_passed': True,
+        })
+        return metrics
 
     def compute_pca_weighted_by_importance(self, activations: torch.Tensor, labels: torch.Tensor, top_k: int = 10) -> Dict[str, float]:
         proto_ids = self.proto_identities.cpu()

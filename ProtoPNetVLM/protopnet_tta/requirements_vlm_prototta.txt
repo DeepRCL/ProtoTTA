@@ -1,0 +1,8 @@
+# Qwen3.6 config declares transformers 4.57.1; keep the model stack isolated
+# from the existing ProtoPNet/PyTorch installation when possible.
+transformers>=4.57.1
+accelerate>=1.0
+safetensors>=0.4
+numpy>=1.24
+scipy>=1.10
+pillow>=10

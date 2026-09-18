@@ -48,10 +48,12 @@ class EnhancedPrototypeMetrics(PrototypeMetricsEvaluator):
         self.ppnet.eval()
         all_preds = []
         all_logits = []
+        all_labels = []
+        n_samples = 0
         
         with torch.no_grad():
             for images, labels in clean_loader:
-                if max_samples and len(all_preds) >= max_samples:
+                if max_samples is not None and n_samples >= max_samples:
                     break
                 
                 images = images.to(self.device)
@@ -65,12 +67,117 @@ class EnhancedPrototypeMetrics(PrototypeMetricsEvaluator):
                 all_logits.append(logits.cpu())
                 _, preds = logits.max(1)
                 all_preds.append(preds.cpu())
+                all_labels.append(labels.cpu())
+                n_samples += labels.size(0)
         
         self.clean_predictions = torch.cat(all_preds)
         self.clean_logits = torch.cat(all_logits)
+        clean_labels = torch.cat(all_labels)
+        if max_samples is not None:
+            self.clean_predictions = self.clean_predictions[:max_samples]
+            self.clean_logits = self.clean_logits[:max_samples]
+            clean_labels = clean_labels[:max_samples]
+
+        if not torch.equal(clean_labels, self.clean_labels.cpu()):
+            raise RuntimeError("Clean prediction and prototype passes used different sample ordering")
+        self.clean_accuracy = float(
+            (self.clean_predictions == clean_labels).float().mean().item()
+        )
         
         if verbose:
             print(f"✓ Collected clean predictions for {len(self.clean_predictions)} samples")
+
+    def evaluate_collected_outputs(
+        self,
+        prototype_activations: torch.Tensor,
+        logits: torch.Tensor,
+        predictions: torch.Tensor,
+        labels: torch.Tensor,
+        top_k: int = 10,
+    ) -> Dict[str, any]:
+        """Compute every Table-3 metric from the exact online prediction pass."""
+        tensors = {
+            'prototype activations': prototype_activations,
+            'logits': logits,
+            'predictions': predictions,
+            'labels': labels,
+        }
+        lengths = {name: len(value) for name, value in tensors.items()}
+        if len(set(lengths.values())) != 1:
+            raise RuntimeError(f"Mismatched collected output lengths: {lengths}")
+        if self.clean_predictions is None or self.clean_logits is None:
+            raise RuntimeError("Clean prediction reference was not collected")
+        if self.clean_prototype_activations is None or self.clean_labels is None:
+            raise RuntimeError("Clean prototype reference was not collected")
+
+        n = len(labels)
+        clean_lengths = {
+            'clean prototype activations': len(self.clean_prototype_activations),
+            'clean logits': len(self.clean_logits),
+            'clean predictions': len(self.clean_predictions),
+            'clean labels': len(self.clean_labels),
+        }
+        if any(value != n for value in clean_lengths.values()):
+            raise RuntimeError(
+                f"Clean/corrupted pairing requires exactly {n} samples; got {clean_lengths}"
+            )
+
+        labels_cpu = labels.cpu()
+        predictions_cpu = predictions.cpu()
+        logits_cpu = logits.cpu()
+        activations_cpu = prototype_activations.cpu()
+        if not torch.equal(labels_cpu, self.clean_labels.cpu()):
+            raise RuntimeError("Clean/corrupted labels or sample ordering do not match")
+
+        metrics = {}
+        metrics.update(self.compute_prototype_activation_consistency(activations_cpu))
+        metrics.update(self.compute_prototype_class_alignment(
+            activations_cpu, labels_cpu, top_k=top_k, weight_by_activation=True
+        ))
+        metrics.update(self.compute_prototype_activation_sparsity(activations_cpu))
+        metrics.update(self.compute_pca_weighted_by_importance(
+            activations_cpu, labels_cpu, top_k=top_k
+        ))
+
+        clean_predictions = self.clean_predictions.cpu()
+        clean_logits = self.clean_logits.cpu()
+        agreement = float((predictions_cpu == clean_predictions).float().mean().item())
+        logit_corr = float(F.cosine_similarity(logits_cpu, clean_logits, dim=1).mean().item())
+        clean_conf = F.softmax(clean_logits, dim=1).max(dim=1)[0]
+        corrupt_conf = F.softmax(logits_cpu, dim=1).max(dim=1)[0]
+        conf_diff = float((corrupt_conf - clean_conf).abs().mean().item())
+        conf_corr = 0.0
+        if torch.std(clean_conf) > 1e-6 and torch.std(corrupt_conf) > 1e-6:
+            conf_corr = float(np.corrcoef(clean_conf.numpy(), corrupt_conf.numpy())[0, 1])
+        metrics.update({
+            'calibration_agreement': agreement,
+            'calibration_logit_corr': logit_corr,
+            'calibration_conf_diff': conf_diff,
+            'calibration_conf_corr': conf_corr,
+        })
+        metrics.update(self.compute_class_contribution_change(
+            self.clean_prototype_activations.cpu(), activations_cpu, labels_cpu
+        ))
+
+        clean_accuracy = float((clean_predictions == labels_cpu).float().mean().item())
+        corrupt_accuracy = float((predictions_cpu == labels_cpu).float().mean().item())
+        lower = max(0.0, clean_accuracy + corrupt_accuracy - 1.0)
+        upper = 1.0 - abs(clean_accuracy - corrupt_accuracy)
+        tolerance = 1.0 / max(n, 1) + 1e-7
+        if agreement < lower - tolerance or agreement > upper + tolerance:
+            raise RuntimeError(
+                "Prediction stability violates paired-accuracy bounds: "
+                f"clean={clean_accuracy:.6f}, corrupt={corrupt_accuracy:.6f}, "
+                f"stability={agreement:.6f}, allowed=[{lower:.6f}, {upper:.6f}]"
+            )
+        metrics.update({
+            'paired_num_samples': n,
+            'clean_accuracy_reference': clean_accuracy,
+            'stability_bound_lower': lower,
+            'stability_bound_upper': upper,
+            'stability_bounds_passed': True,
+        })
+        return metrics
     
     def compute_pca_weighted_by_importance(
         self,

@@ -43,6 +43,7 @@ This public release focuses on the ProtoTTA code paths that are needed to reprod
 - [`ProtoViT/`](./ProtoViT): ProtoViT-based image classification experiments on CUB-200-C, including the main `run_inference.py` and `evaluate_robustness.py` workflows, the prototype metrics, and the VLM evaluation code.
 - [`ProtoLens/`](./ProtoLens): ProtoLens-based NLP robustness experiments on Amazon-C.
 - [`ProtoPFormer/`](./ProtoPFormer): ProtoPFormer-based image robustness experiments on Stanford Dogs-C.
+- [`ProtoPNetVLM/protopnet_tta/`](./ProtoPNetVLM/protopnet_tta): full ProtoPNet/SICAPv2-C robustness and label-blind VLM evaluation pipeline.
 - [`protosvit/`](./protosvit): ProtoS-ViT-based robustness experiments on Stanford Cars-C, including `ProtoTTA+`.
 - [`protopnet/`](./protopnet): ProtoPNet-style prototype adaptation modules, including the base ProtoTTA objective and an enhanced variant.
 - [`protovit_env.yml`](./protovit_env.yml): main environment file for the ProtoViT stack.
@@ -53,8 +54,9 @@ This public release focuses on the ProtoTTA code paths that are needed to reprod
 
 1. **Prototype-aware test-time adaptation** that operates on intermediate prototype signals instead of only output entropy.
 2. **Geometric filtering and stability weighting** to make online adaptation more reliable under heavy corruption.
-3. **Cross-backbone implementations** spanning ProtoViT, ProtoPNet, ProtoLens, ProtoPFormer, and ProtoS-ViT.
-4. **Interpretability-aware evaluation** through prototype consistency/alignment metrics and VLM-based reasoning analysis.
+3. **Adaptive loss routing** between prototype- and output-level entropy using source-free activation evidence.
+4. **Cross-backbone implementations** spanning ProtoViT, ProtoPNet, ProtoLens, ProtoPFormer, and ProtoS-ViT.
+5. **Interpretability-aware evaluation** through prototype consistency/alignment metrics and VLM-based reasoning analysis.
 
 ## Main Entry Points
 
@@ -94,6 +96,11 @@ This public release focuses on the ProtoTTA code paths that are needed to reprod
 │   ├── proto_tta.py
 │   ├── prototype_tta_metrics.py
 │   └── enhanced_prototype_metrics.py
+├── ProtoPNetVLM/protopnet_tta/
+│   ├── evaluate_robustness.py
+│   ├── proto_entropy_enhanced.py
+│   ├── prototype_metrics.py
+│   └── vlm_prototta_{export,score,analyze}.py
 ├── protosvit/
 │   ├── run_inference_cars_c.py
 │   └── evaluate_robustness_cars_c.py
@@ -144,6 +151,13 @@ Key implementation files:
 - [`protosvit/evaluate_robustness_cars_c.py`](./protosvit/evaluate_robustness_cars_c.py): pre-defined `ProtoTTA+` method configurations.
 - [`protopnet/proto_entropy_enchanced.py`](./protopnet/proto_entropy_enchanced.py): enhanced ProtoPNet-oriented variant with hybrid loss and extra stability controls.
 
+The current experimental implementation also supports an adaptive controller
+that changes the prototype/output loss balance from source-free prototype
+activation evidence. The backbone-specific implementations and CLI controls
+are in `ProtoViT/proto_entropy.py`, `ProtoLens/proto_tta.py`,
+`ProtoPFormer/proto_tta.py`, and
+`ProtoPNetVLM/protopnet_tta/proto_entropy_enhanced.py`.
+
 For a generic implementation guide for new models, start with [`ProtoTTA/README.md`](./ProtoTTA/README.md), then use [`ProtoTTA/ADDING_NEW_MODEL.md`](./ProtoTTA/ADDING_NEW_MODEL.md).
 
 ## Developer Documentation
@@ -182,10 +196,10 @@ This part of the repository is designed to study whether ProtoTTA restores human
 
 For the generic developer guide for explainable TTA, see [`ProtoTTA/VLM_EXPLAINABILITY.md`](./ProtoTTA/VLM_EXPLAINABILITY.md).
 
-## Notes Before Pushing
+## Repository Hygiene
 
-- This release intentionally centers the five ProtoTTA-related code paths above and ignores local experiment artifacts, datasets, checkpoints, and unrelated baseline/vendor folders.
-- If these subprojects were originally cloned as separate repositories, remove any embedded `.git` directories inside kept folders before making the first top-level commit; otherwise Git may treat them as nested repositories instead of regular source directories.
+- This release intentionally centers the ProtoTTA code paths above and excludes local experiment artifacts, datasets, checkpoints, paper drafts, generated VLM boards, and cluster-specific launch files.
+- Reproduction commands use explicit data, checkpoint, output, and seed arguments; generated outputs record the configuration and provenance needed for later checks.
 
 ## Citation
 

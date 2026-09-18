@@ -13,6 +13,7 @@ Usage:
 import os
 import sys
 import argparse
+import random
 import torch
 import torch.utils.data
 import torchvision.transforms as transforms
@@ -35,15 +36,25 @@ import memo_adapt
 from prototype_tta_metrics import PrototypeMetricsEvaluator
 from enhanced_prototype_metrics import EnhancedPrototypeMetrics
 from efficiency_metrics import EfficiencyTracker
+from evaluate_robustness import (
+    _loader_sample_ids,
+    evaluate_model as evaluate_model_aligned,
+)
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Set seeds
-torch.manual_seed(0)
-torch.cuda.manual_seed_all(0)
-np.random.seed(0)
+def seed_everything(seed):
+    """Seed MEMO independently for each requested experimental seed."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+# Preserve the historical default behavior.
+seed_everything(0)
 
 
 def setup_memo(model, lr=0.00025, batch_size=16, steps=1):
@@ -232,6 +243,8 @@ def main():
     # Hardware
     parser.add_argument('--gpuid', type=str, default='0',
                        help='GPU ID to use')
+    parser.add_argument('--seed', type=int, default=0,
+                       help='Random seed for MEMO augmentations and adaptation')
     
     # MEMO settings
     parser.add_argument('--memo-lr', type=float, default=0.00025,
@@ -252,6 +265,7 @@ def main():
                        help='Track computational efficiency metrics')
     
     args = parser.parse_args()
+    seed_everything(args.seed)
     
     # Setup device
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpuid
@@ -275,6 +289,7 @@ def main():
     
     results_dict = existing_data.get('results', {})
     metadata = existing_data.get('metadata', {})
+    metadata['memo_seed'] = args.seed
     
     # Define corruption types (severity 5 only)
     corruption_types = [
@@ -342,6 +357,7 @@ def main():
                 max_samples=args.proto_baseline_samples, 
                 verbose=True
             )
+        proto_evaluator.clean_sample_ids = _loader_sample_ids(clean_loader)
         
         print(f"✓ Prototype evaluator ready")
         print("="*80)
@@ -392,6 +408,7 @@ def main():
     pbar = tqdm(corruptions_to_eval, desc="MEMO Evaluation", unit="corruption")
     for corruption_type in pbar:
         pbar.set_description(f"MEMO on {corruption_type}")
+        seed_everything(args.seed)
         
         try:
             # Load data - MEMO requires batch_size=1
@@ -399,6 +416,14 @@ def main():
                 loader = load_dataset_with_corruption(clean_data_dir, corruption_type, severity, batch_size=1)
             else:
                 loader = load_corrupted_dataset(args.data_dir, corruption_type, severity, batch_size=1)
+            if args.prototype_metrics:
+                corrupt_ids = _loader_sample_ids(loader)
+                if proto_evaluator.clean_sample_ids != corrupt_ids:
+                    raise RuntimeError(
+                        f"Clean/corrupted sample IDs are not paired for {corruption_type}: "
+                        f"clean_n={len(proto_evaluator.clean_sample_ids)}, "
+                        f"corrupt_n={len(corrupt_ids)}"
+                    )
             
             # Load fresh model
             base_model = torch.load(args.model, weights_only=False)
@@ -423,7 +448,7 @@ def main():
                     efficiency_tracker.count_adapted_parameters(memo_model, adapted_params)
             
             # Evaluate
-            acc, proto_metrics = evaluate_model(
+            acc, proto_metrics = evaluate_model_aligned(
                 memo_model, loader, 
                 description=f"MEMO on {corruption_type}-{severity}",
                 verbose=False,
@@ -468,6 +493,13 @@ def main():
                         'gt_class_contrib_improvement': proto_metrics.get('gt_class_contrib_improvement'),
                         'gt_class_contrib_change_mean': proto_metrics.get('gt_class_contrib_change_mean'),
                     })
+                for audit_key in (
+                    'paired_num_samples', 'clean_accuracy_reference',
+                    'stability_bound_lower', 'stability_bound_upper',
+                    'stability_bounds_passed',
+                ):
+                    if audit_key in proto_metrics:
+                        result[audit_key] = proto_metrics[audit_key]
                 if 'adaptation_rate' in proto_metrics:
                     result.update({
                         'adaptation_rate': proto_metrics.get('adaptation_rate'),

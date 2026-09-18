@@ -56,11 +56,16 @@ import proto_tta
 import adapt_utils
 from prototype_metrics import ProtoLensMetricsEvaluator, EfficiencyTracker
 
-# Set seeds for reproducibility
-torch.manual_seed(0)
-torch.cuda.manual_seed_all(0)
-np.random.seed(0)
-random.seed(0)
+def seed_everything(seed):
+    """Seed each independent method/corruption evaluation reproducibly."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+# Preserve the historical seed-0 behavior for imports and legacy callers.
+seed_everything(0)
 
 # Force full determinism: online TTA is a feedback loop (each batch's
 # adaptation affects the next), so any non-deterministic backward kernel
@@ -351,7 +356,13 @@ def load_clean_data(data_dir):
     The clean data is typically in the parent 'Amazon' directory, 
     while corrupted data is in 'Amazon-C'.
     """
-    # First, check if data_dir points to Amazon-C, and look in parent Amazon folder
+    # The paired Amazon-C clean subset must take priority over the full Amazon
+    # test set.  The benchmark was generated from a shuffled balanced subset.
+    paired_path = os.path.join(data_dir, 'amazon_c_clean.csv')
+    if os.path.exists(paired_path):
+        return pd.read_csv(paired_path)
+
+    # Legacy fallbacks for datasets that predate amazon_c_clean.csv.
     parent_dir = os.path.dirname(data_dir.rstrip('/'))
     amazon_dir = os.path.join(parent_dir, 'Amazon')
     
@@ -374,6 +385,36 @@ def load_clean_data(data_dir):
             return pd.read_csv(filepath)
     
     raise FileNotFoundError(f"No clean data found. Looked in {amazon_dir} and {data_dir}")
+
+
+def validate_paired_frames(clean_df, corrupted_df, corruption, severity):
+    """Fail rather than silently compare predictions from different reviews."""
+    if len(clean_df) != len(corrupted_df):
+        raise RuntimeError(
+            f"Amazon-C pairing mismatch for {corruption}-s{severity}: "
+            f"clean_n={len(clean_df)}, corrupt_n={len(corrupted_df)}"
+        )
+    clean_labels = clean_df['sentiment'].reset_index(drop=True)
+    corrupt_labels = corrupted_df['sentiment'].reset_index(drop=True)
+    if not clean_labels.equals(corrupt_labels):
+        raise RuntimeError(
+            f"Amazon-C label ordering mismatch for {corruption}-s{severity}"
+        )
+    if 'original_review' not in corrupted_df.columns:
+        raise RuntimeError(
+            f"Amazon-C file for {corruption}-s{severity} has no original_review IDs"
+        )
+    clean_reviews = clean_df['review'].fillna('').astype(str).reset_index(drop=True)
+    original_reviews = corrupted_df['original_review'].fillna('').astype(str).reset_index(drop=True)
+    if not clean_reviews.equals(original_reviews):
+        mismatch = next(
+            i for i, (clean, original) in enumerate(zip(clean_reviews, original_reviews))
+            if clean != original
+        )
+        raise RuntimeError(
+            f"Amazon-C review ordering mismatch for {corruption}-s{severity} "
+            f"at row {mismatch}"
+        )
 
 
 def create_dataloader(df, tokenizer, max_length, batch_size):
@@ -408,13 +449,20 @@ def setup_eata(model, adaptation_mode, e_margin, d_margin):
 
 def setup_prototta(model, adaptation_mode, use_geo_filter, geo_threshold,
                    importance_mode='global', sigmoid_temperature=5.0,
-                   logit_weight=0.0):
+                   logit_weight=0.0, adaptive_lambda=False,
+                   samplewise_lambda=False, gradient_normalize=False,
+                   adaptive_delta0=0.25, adaptive_topk=3,
+                   router_min_consistency=0.25,
+                   lambda_ema_momentum=0.0, lambda_min=0.0,
+                   lambda_max=1.0, record_diagnostics=False,
+                   adaptive_lambda_strategy='activation_margin'):
     model = adapt_utils.configure_model(model, adaptation_mode)
     params, param_names = adapt_utils.collect_params(model, adaptation_mode)
     print(f"ProtoTTA: Adapting {len(params)} parameter groups")
     print(f"  Geometric filter: {use_geo_filter}, Threshold: {geo_threshold}")
     print(f"  Sigmoid temperature: {sigmoid_temperature}")
     print(f"  logit_weight: {logit_weight:.2f}  (proto={1-logit_weight:.2f}, logit={logit_weight:.2f})")
+    print(f"  adaptive_lambda: {adaptive_lambda}, samplewise: {samplewise_lambda}, gradnorm: {gradient_normalize}")
     optimizer = setup_optimizer(params)
     return proto_tta.ProtoTTA(model, optimizer, steps=cfg.OPTIM.STEPS,
                               episodic=cfg.MODEL.EPISODIC,
@@ -424,7 +472,18 @@ def setup_prototta(model, adaptation_mode, use_geo_filter, geo_threshold,
                               consensus_ratio=0.5,
                               importance_mode=importance_mode,
                               sigmoid_temperature=sigmoid_temperature,
-                              logit_weight=logit_weight)
+                              logit_weight=logit_weight,
+                              adaptive_lambda=adaptive_lambda,
+                              samplewise_lambda=samplewise_lambda,
+                              gradient_normalize=gradient_normalize,
+                              adaptive_delta0=adaptive_delta0,
+                              adaptive_topk=adaptive_topk,
+                              router_min_consistency=router_min_consistency,
+                              lambda_ema_momentum=lambda_ema_momentum,
+                              lambda_min=lambda_min,
+                              lambda_max=lambda_max,
+                              record_diagnostics=record_diagnostics,
+                              adaptive_lambda_strategy=adaptive_lambda_strategy)
 
 
 def setup_sar(model, adaptation_mode):
@@ -623,7 +682,9 @@ def evaluate_tta_method(tta_model, dataloader, device, description="TTA",
         result_dict.update(metrics_evaluator.compute_pca(adapted_activations, labels_tensor))
         result_dict.update(metrics_evaluator.compute_sparsity(adapted_activations))
         result_dict.update(metrics_evaluator.compute_pca_weighted(adapted_activations, labels_tensor))
-        result_dict.update(metrics_evaluator.compute_calibration(adapted_predictions, adapted_logits))
+        result_dict.update(metrics_evaluator.compute_calibration(
+            adapted_predictions, adapted_logits, labels_tensor
+        ))
         result_dict.update(metrics_evaluator.compute_gt_class_contribution(adapted_activations, labels_tensor))
     
     # Add adaptation stats
@@ -640,6 +701,15 @@ def evaluate_tta_method(tta_model, dataloader, device, description="TTA",
             'adapted_samples': adapted_samples,
             'total_updates': total_updates
         }
+        for key in (
+            'proto_loss', 'output_loss', 'proto_grad_norm', 'output_grad_norm',
+            'adaptive_lambda', 'adaptive_lambda_raw', 'adaptive_margin',
+            'adaptive_saturation_rate', 'proto_signal_reliability',
+            'output_signal_reliability', 'proto_gradient_consistency',
+            'output_gradient_consistency', 'adaptive_router_gate'
+        ):
+            if key in stats:
+                result_dict['adaptation_stats'][key] = stats[key]
     
     if efficiency_tracker:
         result_dict['efficiency'] = efficiency_tracker.get_metrics()
@@ -738,6 +808,8 @@ def parse_args():
                        default='log_folder/Yelp/_Yelp_fine-tune_all-mpnet-base-v2_gNum_6_ws_5_e_15_pNum_50_lr0.0005/model.pth')
     parser.add_argument('--output', type=str, default='Datasets/Amazon-C/results/robustness_results.json')
     parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--seed', type=int, default=0,
+                        help='Random seed for model adaptation and data loading')
     
     parser.add_argument('--methods', type=str, nargs='+',
                        default=['baseline', 'tent', 'eata', 'prototta', 'sar'],
@@ -761,6 +833,28 @@ def parse_args():
     parser.add_argument('--proto_lambda', type=float, default=1.0,
                        help='Unified ProtoTTA λ ∈ [0,1]: 1.0=pure prototype entropy (ProtoTTA), '
                             '0.0=pure logit entropy, 0.7=ProtoTTA+ default. (default: 1.0)')
+    parser.add_argument('--proto_adaptive_lambda', action='store_true',
+                       help='Set prototype weight lambda from current test activations')
+    parser.add_argument('--proto_samplewise_lambda', action='store_true',
+                       help='Apply adaptive lambda per reliable sample instead of per batch')
+    parser.add_argument('--proto_gradient_normalize', action='store_true',
+                       help='Normalize prototype/output components by their gradient norms')
+    parser.add_argument('--proto_adaptive_delta0', type=float, default=0.25)
+    parser.add_argument('--proto_adaptive_topk', type=int, default=3)
+    parser.add_argument('--proto_router_min_consistency', type=float, default=0.25,
+                       help='Absolute [0,1] prototype-gradient consistency floor for the absolute router')
+    parser.add_argument('--proto_adaptive_strategy', type=str,
+                       choices=['activation_margin', 'relative_evidence',
+                                'source_free_router',
+                                'source_free_router_absolute',
+                                'source_free_router_evidence',
+                                'source_free_router_coverage',
+                                'source_free_router_coverage_absolute'],
+                       default='activation_margin')
+    parser.add_argument('--proto_lambda_ema_momentum', type=float, default=0.0)
+    parser.add_argument('--proto_lambda_min', type=float, default=0.0)
+    parser.add_argument('--proto_lambda_max', type=float, default=1.0)
+    parser.add_argument('--proto_record_diagnostics', action='store_true')
     
     # Prototype metrics
     parser.add_argument('--prototype-metrics', action='store_true', default=True,
@@ -783,6 +877,17 @@ def parse_args():
 
 def main():
     args = parse_args()
+    seed_everything(args.seed)
+    if not 0.0 <= args.proto_lambda <= 1.0:
+        raise ValueError('--proto_lambda must be in [0,1]')
+    if not 0.0 <= args.proto_lambda_min <= args.proto_lambda_max <= 1.0:
+        raise ValueError('Require 0 <= proto_lambda_min <= proto_lambda_max <= 1')
+    if args.proto_adaptive_delta0 <= 0 or args.proto_adaptive_topk < 1:
+        raise ValueError('Adaptive delta0 must be positive and topk must be >= 1')
+    if not 0.0 <= args.proto_router_min_consistency <= 1.0:
+        raise ValueError('--proto_router_min_consistency must be in [0,1]')
+    if args.proto_samplewise_lambda and not args.proto_adaptive_lambda:
+        raise ValueError('--proto_samplewise_lambda requires --proto_adaptive_lambda')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Update cfg
@@ -806,6 +911,7 @@ def main():
     print(f"Corruptions: {corruption_types}")
     print(f"Severities: {severities}")
     print(f"Output: {args.output}")
+    print(f"Seed: {args.seed}")
     print(f"LR: {args.learning_rate}, Mode: {args.adaptation_mode}")
     print(f"ProtoTTA: geo_filter={use_geo}, geo_threshold={args.geo_threshold}, temp={args.sigmoid_temperature}")
     print("=" * 80)
@@ -824,6 +930,7 @@ def main():
                 'model_path': args.model_path,
                 'data_dir': args.data_dir,
                 'batch_size': args.batch_size,
+                'seed': args.seed,
                 'corruption_types': corruption_types,
                 'severities': severities,
                 'methods': args.methods,
@@ -836,7 +943,18 @@ def main():
                             'd_margin': args.d_margin, 'adaptation_mode': args.adaptation_mode},
                     'prototta': {'learning_rate': args.learning_rate, 'sigmoid_temperature': args.sigmoid_temperature,
                                 'geo_filter': use_geo, 'geo_threshold': args.geo_threshold,
-                                'importance_mode': args.importance_mode, 'adaptation_mode': args.adaptation_mode},
+                                'importance_mode': args.importance_mode, 'adaptation_mode': args.adaptation_mode,
+                                'proto_lambda': args.proto_lambda,
+                                'adaptive_lambda': args.proto_adaptive_lambda,
+                                'samplewise_lambda': args.proto_samplewise_lambda,
+                                'gradient_normalize': args.proto_gradient_normalize,
+                                'adaptive_delta0': args.proto_adaptive_delta0,
+                                'adaptive_topk': args.proto_adaptive_topk,
+                                'router_min_consistency': args.proto_router_min_consistency,
+                                'adaptive_strategy': args.proto_adaptive_strategy,
+                                'lambda_ema_momentum': args.proto_lambda_ema_momentum,
+                                'lambda_min': args.proto_lambda_min,
+                                'lambda_max': args.proto_lambda_max},
                     'sar': {'learning_rate': args.learning_rate, 'adaptation_mode': args.adaptation_mode}
                 }
             },
@@ -938,6 +1056,7 @@ def main():
             print(f"  Collecting CLEAN baseline reference for PAC/PCA metrics...")
             try:
                 clean_df = load_clean_data(args.data_dir)
+                validate_paired_frames(clean_df, df, corruption, severity)
                 base_model, base_tokenizer, base_model_args = load_model(args.model_path, device)
                 config_metrics_evaluator = ProtoLensMetricsEvaluator(base_model, device=str(device))
                 clean_dataloader = create_dataloader(clean_df, base_tokenizer, base_model_args.max_length, args.batch_size)
@@ -952,6 +1071,10 @@ def main():
         for method in methods_to_run:
             eval_idx += 1
             print(f"\n--- [{eval_idx}/{len(to_compute)}] {method} on {config_name} ---")
+
+            # Make every method/corruption pair an independent seeded trial,
+            # matching the ProtoViT and ProtoPFormer evaluation protocols.
+            seed_everything(args.seed)
             
             # Load fresh model for this method
             model, tokenizer, model_args = load_model(args.model_path, device)
@@ -979,7 +1102,9 @@ def main():
                     result.update(config_metrics_evaluator.compute_pca(adapted_activations, labels_tensor))
                     result.update(config_metrics_evaluator.compute_sparsity(adapted_activations))
                     result.update(config_metrics_evaluator.compute_pca_weighted(adapted_activations, labels_tensor))
-                    result.update(config_metrics_evaluator.compute_calibration(adapted_predictions, adapted_logits))
+                    result.update(config_metrics_evaluator.compute_calibration(
+                        adapted_predictions, adapted_logits, labels_tensor
+                    ))
                     result.update(config_metrics_evaluator.compute_gt_class_contribution(adapted_activations, labels_tensor))
 
                 
@@ -991,7 +1116,18 @@ def main():
                 elif method == 'prototta':
                     tta_model = setup_prototta(model, args.adaptation_mode, use_geo, args.geo_threshold,
                                               args.importance_mode, args.sigmoid_temperature,
-                                              logit_weight=1.0 - args.proto_lambda)
+                                              logit_weight=1.0 - args.proto_lambda,
+                                              adaptive_lambda=args.proto_adaptive_lambda,
+                                              samplewise_lambda=args.proto_samplewise_lambda,
+                                              gradient_normalize=args.proto_gradient_normalize,
+                                              adaptive_delta0=args.proto_adaptive_delta0,
+                                              adaptive_topk=args.proto_adaptive_topk,
+                                              router_min_consistency=args.proto_router_min_consistency,
+                                              lambda_ema_momentum=args.proto_lambda_ema_momentum,
+                                              lambda_min=args.proto_lambda_min,
+                                              lambda_max=args.proto_lambda_max,
+                                              record_diagnostics=args.proto_record_diagnostics,
+                                              adaptive_lambda_strategy=args.proto_adaptive_strategy)
                 elif method == 'sar':
                     tta_model = setup_sar(model, args.adaptation_mode)
                 
