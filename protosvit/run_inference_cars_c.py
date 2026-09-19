@@ -31,14 +31,14 @@ Usage
 # Single corruption
 python run_inference_cars_c.py \\
     --ckpt logs/.../checkpoints/epoch_076.ckpt \\
-    --cars_c_dir /home/mahdi.abootorabi/protovit/InfoDisent/Classificators/datasets/cars_c \\
+    --cars_c_dir /path/to/cars_c \\
     --modes normal tent eata sar proto_tta proto_tta_plus \\
     --corruption gaussian_noise --severity 5
 
 # Full sweep
 python run_inference_cars_c.py \\
     --ckpt logs/.../checkpoints/epoch_076.ckpt \\
-    --cars_c_dir /home/mahdi.abootorabi/protovit/InfoDisent/Classificators/datasets/cars_c \\
+    --cars_c_dir /path/to/cars_c \\
     --modes normal proto_tta proto_tta_plus \\
     --all_corruptions \\
     --output results/cars_c_tta.json

@@ -431,7 +431,8 @@ def parse_modes(mode_arg):
 def run_inference(model_path, gpu_id='0', corruption=None, severity=1, mode='normal',
                   use_pre_generated=True, output_dir='./results',
                   geo_filter_threshold=None, compute_source_threshold=False,
-                  adaptation_mode='all_adapt'):
+                  adaptation_mode='all_adapt',
+                  corrupted_data_dir='./datasets/SICAPv2_c'):
     """
     Main inference function.
 
@@ -442,6 +443,7 @@ def run_inference(model_path, gpu_id='0', corruption=None, severity=1, mode='nor
         severity: Corruption severity (1-5)
         mode: Comma-separated list of TTA modes
         use_pre_generated: Use pre-generated corrupted images
+        corrupted_data_dir: Root directory of the pre-generated corruptions
         output_dir: Directory to save results
     """
     # Set GPU
@@ -459,8 +461,7 @@ def run_inference(model_path, gpu_id='0', corruption=None, severity=1, mode='nor
     # Load data
     if corruption:
         # Check for pre-generated corrupted dataset
-        corrupted_data_dir = Path('/mnt/ext/SICAPv2_c')
-        corruption_path = corrupted_data_dir / corruption / str(severity)
+        corruption_path = Path(corrupted_data_dir) / corruption / str(severity)
 
         if use_pre_generated and corruption_path.exists():
             print(f'Using PRE-GENERATED corrupted images from: {corruption_path}')
@@ -965,6 +966,13 @@ def main():
     )
 
     parser.add_argument(
+        '--data_dir',
+        type=str,
+        default='./datasets/SICAPv2_c',
+        help='Root directory of the pre-generated SICAPv2-C dataset'
+    )
+
+    parser.add_argument(
         '--corruption',
         type=str,
         default=None,
@@ -1049,7 +1057,8 @@ def main():
         output_dir=args.output_dir,
         geo_filter_threshold=args.geo_filter_threshold,
         compute_source_threshold=args.compute_source_threshold,
-        adaptation_mode=args.adaptation_mode
+        adaptation_mode=args.adaptation_mode,
+        corrupted_data_dir=args.data_dir,
     )
 
 

@@ -37,7 +37,7 @@ def parse_args():
         '--model',
         default='./saved_models/vgg19_bn/sicapv2_002/epoch_20_last_5.pth',
     )
-    parser.add_argument('--data-dir', default='/mnt/ext/SICAPv2_c/')
+    parser.add_argument('--data-dir', default='./datasets/SICAPv2_c')
     parser.add_argument(
         '--output-dir',
         default='../coverage_router_absolute_audit_sicapv2c',

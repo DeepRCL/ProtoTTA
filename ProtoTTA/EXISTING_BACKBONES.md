@@ -85,14 +85,17 @@ python run_inference_cars_c.py \
   --severity 5
 ```
 
-## ProtoPNet-style Modules
+## ProtoPNet / SICAPv2-C
 
 Main files:
 
-- [`protopnet/proto_entropy.py`](../protopnet/proto_entropy.py)
-- [`protopnet/proto_entropy_enchanced.py`](../protopnet/proto_entropy_enchanced.py)
+- [`ProtoPNetVLM/protopnet_tta/evaluate_robustness.py`](../ProtoPNetVLM/protopnet_tta/evaluate_robustness.py)
+- [`ProtoPNetVLM/protopnet_tta/proto_entropy_enhanced.py`](../ProtoPNetVLM/protopnet_tta/proto_entropy_enhanced.py)
+- [`ProtoPNetVLM/protopnet_tta/README.md`](../ProtoPNetVLM/protopnet_tta/README.md)
 
-These files are module-level implementations rather than a full standalone training/evaluation package in this release.
+The compact modules in [`protopnet/`](../protopnet) are retained as standalone
+integration examples. The full evaluation pipeline is in `ProtoPNetVLM` and
+expects the upstream `proto_baseline` package on `PYTHONPATH`.
 
 ## VLM Explainability
 

@@ -552,14 +552,14 @@ def main():
     parser.add_argument(
         '--data_dir',
         type=str,
-        default='/mnt/ext/SICAPv2_c/',
+        default='./datasets/SICAPv2_c',
         help='Path to corrupted dataset directory'
     )
     
     parser.add_argument(
         '--clean_data_dir',
         type=str,
-        default='/home/mahdi/prototta/kan-head/datasets/SICAPv2_cropped/test_cropped',
+        default='./datasets/SICAPv2_cropped/test_cropped',
         help='Path to clean test dataset'
     )
     

@@ -65,15 +65,4 @@ python run_inference_amazon_c.py \
 
 ---
 
-## 📜 Citation
-
-If you find this work useful in your research, please consider citing:
-
-```bibtex
-@article{protolens2025,
-  title={ProtoLens: Interpretable Text Classification via Shared Prototypes},
-  author={Abootorabi, Mahdi and et al.},
-  journal={arXiv preprint},
-  year={2025}
-}
-```
+Citation information is withheld in this anonymous review artifact.

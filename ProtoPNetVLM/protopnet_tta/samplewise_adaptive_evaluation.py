@@ -36,7 +36,7 @@ def parse_args():
         '--model',
         default='./saved_models/vgg19_bn/sicapv2_002/epoch_20_last_5.pth',
     )
-    parser.add_argument('--data-dir', default='/mnt/ext/SICAPv2_c/')
+    parser.add_argument('--data-dir', default='./datasets/SICAPv2_c')
     parser.add_argument(
         '--clean-data-dir',
         default='./datasets/SICAPv2_cropped/test_cropped',

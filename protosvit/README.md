@@ -3,17 +3,25 @@
 [![lightning](https://img.shields.io/badge/-Lightning_2.0+-792ee5?logo=pytorchlightning&logoColor=white)](https://pytorchlightning.ai/)
 [![hydra](https://img.shields.io/badge/Config-Hydra_1.3-89b8cd)](https://hydra.cc/)
 # ProtoS-ViT
-This is the implementation of ProtoS-Vit along the ressources required to evaluate the model. ProtoS-Vit is a novel architecture to turn any frozen ViT backbone into a prototypical model as shown in the figure below:
-
-![Model architecture](./img/protosvit_arch.png)
-
-The model is evaluated both in terms of classification performance and explanability, outperforming current state-of-the art models across a range of metrics:
-<p align="center">
-<img src="./img/radar_FunnyBirds.png" height="400">
-</p>
+This is the ProtoS-ViT implementation together with the ProtoTTA evaluation
+path used for Stanford Cars-C. ProtoS-ViT turns a frozen ViT backbone into a
+sparse prototype model.
 
 ## Installation
-A dockerfile is provided if you want to easily run the project with pdm and the required packages.
+Dependencies are declared in `pyproject.toml`, `pdm.lock`, and
+`requirements.txt`.
+
+## Test-time adaptation on Cars-C
+
+```bash
+python run_inference_cars_c.py \
+  --ckpt /path/to/checkpoint.ckpt \
+  --cars_c_dir /path/to/cars_c \
+  --modes normal tent eata sar proto_tta proto_tta_plus \
+  --all_corruptions \
+  --severity 5 \
+  --output /path/to/results.json
+```
 
 ## Get Started
 If you are running the container, you can start training your model with:

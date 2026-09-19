@@ -15,7 +15,7 @@ Test ProtoLens models with adaptation methods (TENT) on new domains like Hotel r
 ### Recommended: Use `run_inference_hotel.py`
 
 ```bash
-cd /home/mahdi.abootorabi/protovit/ProtoLens
+cd ProtoLens
 
 # Test all methods with 4K balanced samples
 python run_inference_hotel.py \

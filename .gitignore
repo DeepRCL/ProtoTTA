@@ -136,9 +136,8 @@ slurm_*.sh
 # -----------------------------------------------------------------------------
 # Paper drafts / unrelated PDFs
 # -----------------------------------------------------------------------------
+/Files/
 *.pdf
-!ProtoTTA_ICLR2026_TTU (34).pdf
-iclr2026_conference (5).tex
+*.tex
 check_cuda.py
-Files/ProtoTTA-Poster.png
 protosvit/slurm*.out

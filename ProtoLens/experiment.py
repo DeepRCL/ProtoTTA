@@ -56,8 +56,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def gold_eval(model, data_loader, p_sent2pid, device, epo_num):
-    # NOTE: This function is not used in training - commenting out hardcoded path
-    # sentence_pool = pd.read_csv("/home/bwei2/ProtoTextClassification/Data/IMDB_cluster_" + str(self.num_prototypes) + "_to_sub_sentence.csv", index_col=0, header=None).to_numpy()
+    # This legacy visualization helper is not used during training.
     model.eval()
     predictions = []
     actual_labels = []
@@ -138,7 +137,7 @@ def gold_eval(model, data_loader, p_sent2pid, device, epo_num):
     #     #         [i for i in word_array[idx, :] if i is not None]
     #     #         for idx in range(len(original_text))
     #     #     ]
-    # document.save("/home/bwei2/ProtoTextClassification/_test/" + str(epo_num) + ".docx")
+    # document.save(f"visualizations/epoch_{epo_num}.docx")
     # return accuracy_score(actual_labels, predictions), classification_report(actual_labels, predictions)
 
 def evaluate(model, data_loader, device):
@@ -168,9 +167,9 @@ def evaluate(model, data_loader, device):
 
 
 def find_closet_test_sentence(model, data_loader, device):
-    # NOTE: This function is not used in training - commenting out hardcoded path
+    # This legacy visualization helper is not used during training.
     model.eval()
-    # df = pd.read_csv("/home/bwei2/ProtoTextClassification/Data/test_imdb.csv")
+    # df = pd.read_csv("datasets/test_imdb.csv")
     # test_texts = df['review'].tolist()
     return {}
     test_ins_emb = []
