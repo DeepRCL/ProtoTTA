@@ -3,7 +3,7 @@ Generic ProtoTTA / ProtoTTA+ implementation skeleton.
 
 This file is intentionally lightweight and educational rather than plug-and-play.
 It captures the common structure shared by the repository's ProtoViT, ProtoLens,
-ProtoPFormer, ProtoS-ViT, and ProtoPNet-style implementations.
+ProtoPFormer, and ProtoPNet-style implementations.
 
 To use it for a new model, replace the TODO blocks with architecture-specific
 logic for:

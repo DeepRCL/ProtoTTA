@@ -66,25 +66,6 @@ python run_inference_dogs.py \
   --severity 5
 ```
 
-## ProtoS-ViT
-
-Main files:
-
-- [`protosvit/run_inference_cars_c.py`](../protosvit/run_inference_cars_c.py)
-- [`protosvit/evaluate_robustness_cars_c.py`](../protosvit/evaluate_robustness_cars_c.py)
-
-Example:
-
-```bash
-cd protosvit
-python run_inference_cars_c.py \
-  --ckpt /path/to/epoch.ckpt \
-  --cars_c_dir /path/to/cars_c \
-  --modes proto_tta proto_tta_plus \
-  --corruption gaussian_noise \
-  --severity 5
-```
-
 ## ProtoPNet / SICAPv2-C
 
 Main files:

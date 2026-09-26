@@ -8,7 +8,6 @@ The rest of the repository contains paper-specific implementations for:
 - ProtoPNet-style models
 - ProtoLens
 - ProtoPFormer
-- ProtoS-ViT
 
 This folder distills the **shared implementation pattern** across those backbones so that future users can port ProtoTTA to a new model without reverse-engineering each project separately.
 
@@ -26,7 +25,7 @@ ProtoTTA adapts a prototype model at test time by using **prototype-level signal
 
 ## Shared Design Across Backbones
 
-Across ProtoViT, ProtoPNet, ProtoLens, ProtoPFormer, and ProtoS-ViT, the common structure is:
+Across ProtoViT, ProtoPNet, ProtoLens, and ProtoPFormer, the common structure is:
 
 1. expose prototype activations or similarities during inference,
 2. choose which parameters are allowed to adapt,
@@ -54,7 +53,5 @@ Across ProtoViT, ProtoPNet, ProtoLens, ProtoPFormer, and ProtoS-ViT, the common 
 - [`ProtoPFormer/proto_tta.py`](../ProtoPFormer/proto_tta.py)
 - [`ProtoPFormer/prototype_tta_metrics.py`](../ProtoPFormer/prototype_tta_metrics.py)
 - [`ProtoPFormer/enhanced_prototype_metrics.py`](../ProtoPFormer/enhanced_prototype_metrics.py)
-- [`protosvit/run_inference_cars_c.py`](../protosvit/run_inference_cars_c.py)
-- [`protosvit/evaluate_robustness_cars_c.py`](../protosvit/evaluate_robustness_cars_c.py)
 - [`protopnet/proto_entropy.py`](../protopnet/proto_entropy.py)
 - [`protopnet/proto_entropy_enchanced.py`](../protopnet/proto_entropy_enchanced.py)

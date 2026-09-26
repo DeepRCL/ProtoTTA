@@ -31,7 +31,6 @@ ProtoViT/                         CUB-200-C implementation and VLM analysis
 ProtoPFormer/                     Stanford Dogs-C implementation
 ProtoLens/                        Amazon-C text implementation
 ProtoPNetVLM/protopnet_tta/       SICAPv2-C and label-blind VLM pipeline
-protosvit/                        Stanford Cars-C implementation
 protopnet/                        Standalone ProtoPNet adaptation modules
 protovit_env.yml                  Main vision environment
 vlm_environment.yml               VLM analysis environment
@@ -70,7 +69,6 @@ them in ImageFolder-compatible layouts where applicable:
 
 - CUB-200-2011 for ProtoViT;
 - Stanford Dogs for ProtoPFormer;
-- Stanford Cars for ProtoS-ViT;
 - SICAPv2 for ProtoPNet;
 - Yelp/Amazon review data for ProtoLens.
 
@@ -157,9 +155,6 @@ python -m ProtoPNetVLM.protopnet_tta.evaluate_robustness \
   --track-efficiency
 ```
 
-ProtoS-ViT commands are documented in
-[`ProtoTTA/EXISTING_BACKBONES.md`](ProtoTTA/EXISTING_BACKBONES.md).
-
 ## Label-free ProtoLens supervisor
 
 The text pipeline exports BEFORE/AFTER predictions and prototype evidence,
@@ -201,7 +196,7 @@ Run syntax and focused unit checks from the repository root:
 ```bash
 python -m compileall -q \
   ProtoTTA ProtoLens ProtoPFormer ProtoViT \
-  ProtoPNetVLM/protopnet_tta protopnet protosvit
+  ProtoPNetVLM/protopnet_tta protopnet
 
 cd ProtoViT
 python -m unittest -v \

@@ -132,7 +132,6 @@ Good references:
 
 - [`ProtoViT/proto_entropy.py`](../ProtoViT/proto_entropy.py)
 - [`ProtoPFormer/proto_tta.py`](../ProtoPFormer/proto_tta.py)
-- [`protosvit/run_inference_cars_c.py`](../protosvit/run_inference_cars_c.py)
 
 ## 4. Expose a `forward_no_adapt` Path
 
@@ -185,7 +184,7 @@ Options:
 
 ### Non-negative similarity or activation in `[0, +inf)`
 
-Used by ProtoS-ViT-style pipelines after ReLU / score heads.
+Used by pipelines with ReLU or other non-negative score heads.
 
 Option:
 
@@ -296,7 +295,6 @@ ProtoTTA+ is useful when:
 
 Reference:
 
-- [`protosvit/run_inference_cars_c.py`](../protosvit/run_inference_cars_c.py)
 - [`protopnet/proto_entropy_enchanced.py`](../protopnet/proto_entropy_enchanced.py)
 
 ## 12. CNN vs ViT Notes

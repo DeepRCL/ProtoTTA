@@ -140,4 +140,3 @@ slurm_*.sh
 *.pdf
 *.tex
 check_cuda.py
-protosvit/slurm*.out

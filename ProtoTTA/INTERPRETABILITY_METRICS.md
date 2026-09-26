@@ -31,7 +31,6 @@ Good references:
 - [`ProtoLens/prototype_metrics.py`](../ProtoLens/prototype_metrics.py)
 - [`ProtoPFormer/prototype_tta_metrics.py`](../ProtoPFormer/prototype_tta_metrics.py)
 - [`ProtoPFormer/enhanced_prototype_metrics.py`](../ProtoPFormer/enhanced_prototype_metrics.py)
-- [`protosvit/evaluate_robustness_cars_c.py`](../protosvit/evaluate_robustness_cars_c.py)
 
 ## 2. Standardize Prototype Activations First
 
