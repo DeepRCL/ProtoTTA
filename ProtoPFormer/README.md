@@ -21,7 +21,7 @@ python evaluate_robustness_dogs.py \
   --data_dir /path/to/stanford_dogs_c \
   --clean_dir /path/to/stanford_dogs_clean \
   --output /path/to/results.json \
-  --modes normal tent eata sar cotta \
+  --modes normal tent eata sar \
           proto_tta_adaptive_source_free_router_coverage_absolute \
   --corruptions all \
   --prototype-metrics \

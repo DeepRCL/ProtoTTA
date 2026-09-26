@@ -56,9 +56,6 @@ import proto_tta
 import adapt_utils
 from prototype_metrics import ProtoLensMetricsEvaluator, EfficiencyTracker
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tta_baselines import CoTTA, TokenMaskTransform
-
 def seed_everything(seed):
     """Seed each independent method/corruption evaluation reproducibly."""
     random.seed(seed)
@@ -440,19 +437,6 @@ def setup_tent(model, adaptation_mode):
     return tent.Tent(model, optimizer, steps=cfg.OPTIM.STEPS, episodic=cfg.MODEL.EPISODIC)
 
 
-def setup_cotta(model, adaptation_mode, tokenizer):
-    """CoTTA for text, using token masking for the augmentation teacher."""
-    model = adapt_utils.configure_model(model, adaptation_mode)
-    params, _ = adapt_utils.collect_params(model, adaptation_mode)
-    optimizer = setup_optimizer(params)
-    return CoTTA(
-        model, optimizer, TokenMaskTransform(tokenizer.mask_token_id, probability=0.10),
-        steps=cfg.OPTIM.STEPS, episodic=cfg.MODEL.EPISODIC,
-        mt_alpha=0.999, rst_m=0.01, ap=0.92, n_augmentations=32,
-        symmetric_loss=False,
-    )
-
-
 def setup_eata(model, adaptation_mode, e_margin, d_margin):
     model = adapt_utils.configure_model(model, adaptation_mode)
     params, param_names = adapt_utils.collect_params(model, adaptation_mode)
@@ -828,7 +812,7 @@ def parse_args():
                         help='Random seed for model adaptation and data loading')
     
     parser.add_argument('--methods', type=str, nargs='+',
-                       default=['baseline', 'tent', 'eata', 'sar', 'cotta', 'prototta'],
+                       default=['baseline', 'tent', 'eata', 'sar', 'prototta'],
                        help='Methods to evaluate (additive - only adds missing)')
     parser.add_argument('--corruption_types', type=str, nargs='+', default=None)
     parser.add_argument('--severities', type=int, nargs='+', default=None)
@@ -1124,7 +1108,7 @@ def main():
                     result.update(config_metrics_evaluator.compute_gt_class_contribution(adapted_activations, labels_tensor))
 
                 
-            elif method in ['tent', 'eata', 'prototta', 'sar', 'cotta']:
+            elif method in ['tent', 'eata', 'prototta', 'sar']:
                 if method == 'tent':
                     tta_model = setup_tent(model, args.adaptation_mode)
                 elif method == 'eata':
@@ -1146,8 +1130,6 @@ def main():
                                               adaptive_lambda_strategy=args.proto_adaptive_strategy)
                 elif method == 'sar':
                     tta_model = setup_sar(model, args.adaptation_mode)
-                elif method == 'cotta':
-                    tta_model = setup_cotta(model, args.adaptation_mode, tokenizer)
                 
                 result = evaluate_tta_method(
                     tta_model, dataloader, device, method,

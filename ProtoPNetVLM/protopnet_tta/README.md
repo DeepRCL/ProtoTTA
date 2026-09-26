@@ -47,7 +47,7 @@ python -m ProtoPNetVLM.protopnet_tta.evaluate_robustness \
   --output /path/to/results.json \
   --severity 5 \
   --batch_size 64 \
-  --modes Normal Tent CoTTA EATA SAR MEMO ProtoAbsoluteConsistencyCoverageRouter \
+  --modes Normal Tent EATA SAR MEMO ProtoAbsoluteConsistencyCoverageRouter \
   --prototype-metrics \
   --track-efficiency
 ```

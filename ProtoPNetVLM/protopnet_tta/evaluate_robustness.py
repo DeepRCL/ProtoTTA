@@ -37,7 +37,6 @@ from datetime import datetime
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 # Import ProtoPNet
 from proto_baseline import ProtoPNetModel, ModelConfig, HeadConfig
@@ -59,7 +58,6 @@ from .noise_utils import get_all_corruption_types
 from .prototype_metrics import PrototypeMetricsEvaluator
 from .enhanced_prototype_metrics import EnhancedPrototypeMetrics
 from .efficiency_metrics import EfficiencyTracker
-from tta_baselines import CoTTA, CoTTAImageTransform
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -264,20 +262,6 @@ def setup_tent(model):
 
     optimizer = setup_optimizer(params)
     return tent.Tent(model, optimizer, steps=cfg_optim.STEPS, episodic=False)
-
-
-def setup_cotta(model):
-    """CoTTA with the same BN/add-on parameter subset as other SICAP baselines."""
-    model = tent.configure_model(model, adaptation_mode='batchnorm_addon')
-    params, _ = tent.collect_params(model, adaptation_mode='batchnorm_addon')
-    if not params:
-        raise RuntimeError('CoTTA found no batchnorm/add-on parameters to adapt')
-    optimizer = setup_optimizer(params)
-    return CoTTA(
-        model, optimizer, CoTTAImageTransform(mean, std, image_size=img_size),
-        steps=cfg_optim.STEPS, mt_alpha=0.999, rst_m=0.01, ap=0.92,
-        n_augmentations=32, symmetric_loss=False,
-    )
 
 
 def setup_eata(model, test_loader, device):
@@ -700,8 +684,6 @@ def evaluate_single_combination(model_path, corruption_type, severity,
             eval_model = base_model
         elif mode_name == 'Tent':
             eval_model = setup_tent(base_model)
-        elif mode_name == 'CoTTA':
-            eval_model = setup_cotta(base_model)
         elif mode_name == 'EATA':
             eval_model = setup_eata(base_model, test_loader, device)
         elif mode_name == 'ProtoEntropy' or mode_name.startswith('ProtoEntropy-BN'):
@@ -1299,7 +1281,6 @@ def main():
     all_modes = {
         'Normal': {},
         'Tent': {},
-        'CoTTA': {},
         'EATA': {},
         'ProtoEntropy': {
             'geo_filter_threshold': args.geo_filter_threshold,

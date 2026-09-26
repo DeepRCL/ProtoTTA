@@ -17,7 +17,6 @@ model's intermediate prototype evidence. The implementation provides:
 - prototype-importance and prediction-confidence weighting;
 - adaptive routing between prototype and output entropy;
 - component-wise gradient normalization and stability guards;
-- CoTTA baseline integration across the supported backbones;
 - PAC, PCA-W, calibration, sparsity, selection-rate, and efficiency metrics;
 - label-blind VLM export, scoring, and analysis utilities.
 
@@ -34,7 +33,6 @@ ProtoLens/                        Amazon-C text implementation
 ProtoPNetVLM/protopnet_tta/       SICAPv2-C and label-blind VLM pipeline
 protosvit/                        Stanford Cars-C implementation
 protopnet/                        Standalone ProtoPNet adaptation modules
-tta_baselines/                    Shared test-time adaptation baselines
 protovit_env.yml                  Main vision environment
 vlm_environment.yml               VLM analysis environment
 flsh_att_environment.yml          Optional Flash Attention environment
@@ -95,7 +93,7 @@ python evaluate_robustness.py \
   --data_dir /path/to/cub200_c \
   --clean_data_dir /path/to/cub200_clean_test \
   --output /path/to/results/protovit.json \
-  --modes normal tent eata sar cotta \
+  --modes normal tent eata sar \
           proto_imp_conf_adaptive_source_free_router_coverage_absolute \
   --corruptions all \
   --prototype-metrics \
@@ -115,7 +113,7 @@ python evaluate_robustness_dogs.py \
   --data_dir /path/to/stanford_dogs_c \
   --clean_dir /path/to/stanford_dogs_clean \
   --output /path/to/results/protopformer.json \
-  --modes normal tent eata sar cotta \
+  --modes normal tent eata sar \
           proto_tta_adaptive_source_free_router_coverage_absolute \
   --corruptions all \
   --prototype-metrics \
@@ -134,7 +132,7 @@ python evaluate_robustness_amazonc.py \
   --model_path /path/to/protolens_checkpoint.pth \
   --data_dir /path/to/Amazon-C \
   --output /path/to/results/protolens.json \
-  --methods baseline tent eata sar cotta prototta \
+  --methods baseline tent eata sar prototta \
   --proto_adaptive_lambda \
   --proto_gradient_normalize \
   --proto_adaptive_strategy source_free_router_coverage_absolute \
@@ -153,7 +151,7 @@ python -m ProtoPNetVLM.protopnet_tta.evaluate_robustness \
   --output /path/to/results/protopnet.json \
   --severity 5 \
   --batch_size 64 \
-  --modes Normal Tent CoTTA EATA SAR MEMO \
+  --modes Normal Tent EATA SAR MEMO \
           ProtoAbsoluteConsistencyCoverageRouter \
   --prototype-metrics \
   --track-efficiency
@@ -211,10 +209,7 @@ python -m unittest -v \
   test_fullset_vlm_gate.py \
   test_paired_adaptation_supervision.py
 
-cd ..
-python -m unittest -v tta_baselines/test_cotta.py
-
-cd ProtoLens
+cd ../ProtoLens
 python -m unittest -v test_protolens_llm.py
 ```
 

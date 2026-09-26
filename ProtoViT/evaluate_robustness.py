@@ -41,9 +41,6 @@ from prototype_tta_metrics import PrototypeMetricsEvaluator
 from enhanced_prototype_metrics import EnhancedPrototypeMetrics
 from efficiency_metrics import EfficiencyTracker, compare_efficiency_metrics
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from tta_baselines import CoTTA, CoTTAImageTransform
-
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -100,19 +97,6 @@ def setup_tent(model):
     params, param_names = tent.collect_params(model)
     optimizer = setup_optimizer(params)
     return tent.Tent(model, optimizer, steps=cfg.OPTIM.STEPS, episodic=cfg.MODEL.EPISODIC)
-
-
-def setup_cotta(model):
-    """Set up CoTTA with the configured transformer parameter subset."""
-    adaptation_mode = 'layernorm_attn_bias'
-    model = proto_entropy.configure_model(model, adaptation_mode=adaptation_mode)
-    params, _ = proto_entropy.collect_params(model, adaptation_mode=adaptation_mode)
-    optimizer = setup_optimizer(params)
-    return CoTTA(
-        model, optimizer, CoTTAImageTransform(mean, std, image_size=img_size),
-        steps=cfg.OPTIM.STEPS, episodic=cfg.MODEL.EPISODIC,
-        mt_alpha=0.999, rst_m=0.001, ap=0.1, n_augmentations=32,
-    )
 
 
 def setup_proto_entropy(model, use_importance=False, use_confidence=False,
@@ -297,10 +281,7 @@ def evaluate_model(model, loader, description="Inference", verbose=True,
     # hook records the exact backbone output that produced the returned logits,
     # so online TTA is never replayed from its final checkpoint.
     model.eval()
-    actual_model = (
-        model.metric_model if hasattr(model, 'metric_model')
-        else model.model if hasattr(model, 'model') else model
-    )
+    actual_model = model.model if hasattr(model, 'model') else model
     raw_outputs = []
     hook = None
     if compute_proto_metrics and proto_evaluator is not None:
@@ -332,11 +313,7 @@ def evaluate_model(model, loader, description="Inference", verbose=True,
             n_examples += batch_size
 
             if compute_proto_metrics and proto_evaluator is not None:
-                raw = getattr(model, 'last_metric_output', None)
-                if raw is None:
-                    raw = _find_matching_raw_output(raw_outputs, logits)
-                elif _output_logits(raw).data_ptr() != logits.data_ptr():
-                    raise RuntimeError('CoTTA metric output does not match returned logits')
+                raw = _find_matching_raw_output(raw_outputs, logits)
                 activations = _protovit_activations(raw)
                 all_activations.append(activations.detach().cpu())
                 all_logits.append(logits.detach().cpu())
@@ -523,8 +500,6 @@ def evaluate_single_combination(model_path, corruption_type, severity, data_dir,
             eval_model = base_model
         elif mode_name == 'tent':
             eval_model = setup_tent(base_model)
-        elif mode_name == 'cotta':
-            eval_model = setup_cotta(base_model)
         elif mode_name.startswith('proto_imp_conf'):
             # ProtoEntropy with canonical or explicitly ablated weighting.
             eval_model = setup_proto_entropy(
@@ -739,7 +714,7 @@ def main():
     parser.add_argument('--use-enhanced-metrics', action='store_true', default=False,
                        help='Use enhanced prototype metrics (PCA-Weighted, Calibration, GT Class Contribution).')
     parser.add_argument('--modes', nargs='+', default=None,
-                       help='Subset of modes to run. Choices: normal tent loss eata sar cotta '
+                       help='Subset of modes to run. Choices: normal tent loss eata sar '
                             'proto_imp_conf_v1 proto_imp_conf_v2 proto_imp_conf_v3. '
                             'Default: all modes.')
     parser.add_argument('--corruptions', nargs='+', default=['all'],
@@ -861,7 +836,6 @@ def main():
     modes = {
         'normal': {},
         'tent': {},
-        'cotta': {},
         'proto_imp_conf_v1': {  # Full config
             'use_geometric_filter': True,
             'geo_filter_threshold': 0.92,
