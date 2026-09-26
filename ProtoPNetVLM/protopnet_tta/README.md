@@ -47,8 +47,7 @@ python -m ProtoPNetVLM.protopnet_tta.evaluate_robustness \
   --output /path/to/results.json \
   --severity 5 \
   --batch_size 64 \
-  --seed 0 \
-  --modes Normal Tent EATA SAR MEMO ProtoAbsoluteConsistencyCoverageRouter \
+  --modes Normal Tent CoTTA EATA SAR MEMO ProtoAbsoluteConsistencyCoverageRouter \
   --prototype-metrics \
   --track-efficiency
 ```
@@ -57,8 +56,7 @@ For the source-free evaluation path, add `--skip-clean-evaluation` and omit
 `--prototype-metrics`. The clean set is used only for offline paired metrics;
 it is not used by the adaptation objective.
 
-Important reproducibility controls include `--seed`, `--stream-order`,
-`--stream-order-seed`, `--corruptions`, `--lambda-proto`,
+Important reproducibility controls include `--stream-order`, `--corruptions`, `--lambda-proto`,
 `--adaptive-delta0`, and `--adaptive-top-k`. The evaluator writes these values,
 dataset hashes, and method configurations into the output metadata.
 
@@ -69,8 +67,8 @@ dataset hashes, and method configurations into the output metadata.
 - `evaluate_robustness.py`: paired clean/corrupted evaluation entry point.
 - `prototype_metrics.py` and `enhanced_prototype_metrics.py`: PAC, PCA-W,
   calibration, sparsity, and related diagnostics.
-- `vlm_prototta_export.py`, `vlm_prototta_score.py`, and
-  `vlm_prototta_analyze.py`: label-blind VLM export, scoring, and analysis.
+- `vlm_prototta_export.py` and `vlm_prototta_score.py`: label-blind VLM export
+  and scoring.
 
 Generated datasets, checkpoints, reasoning boards, sealed labels, logs, and
 result files are intentionally excluded from version control.

@@ -17,6 +17,7 @@ model's intermediate prototype evidence. The implementation provides:
 - prototype-importance and prediction-confidence weighting;
 - adaptive routing between prototype and output entropy;
 - component-wise gradient normalization and stability guards;
+- CoTTA baseline integration across the supported backbones;
 - PAC, PCA-W, calibration, sparsity, selection-rate, and efficiency metrics;
 - label-blind VLM export, scoring, and analysis utilities.
 
@@ -33,6 +34,7 @@ ProtoLens/                        Amazon-C text implementation
 ProtoPNetVLM/protopnet_tta/       SICAPv2-C and label-blind VLM pipeline
 protosvit/                        Stanford Cars-C implementation
 protopnet/                        Standalone ProtoPNet adaptation modules
+tta_baselines/                    Shared test-time adaptation baselines
 protovit_env.yml                  Main vision environment
 vlm_environment.yml               VLM analysis environment
 flsh_att_environment.yml          Optional Flash Attention environment
@@ -82,8 +84,7 @@ distribution constraints.
 ## Main evaluation commands
 
 The commands below show the adaptive configuration and expose every path that
-must be supplied locally. Use seeds `0`, `2`, and `3` for the three-seed
-protocol, running one seed at a time.
+must be supplied locally. Output filenames are illustrative and may be changed.
 
 ### ProtoViT / CUB-200-C
 
@@ -93,9 +94,8 @@ python evaluate_robustness.py \
   --model /path/to/protovit_checkpoint.pth \
   --data_dir /path/to/cub200_c \
   --clean_data_dir /path/to/cub200_clean_test \
-  --output /path/to/results/protovit_seed0.json \
-  --seed 0 \
-  --modes normal tent eata sar \
+  --output /path/to/results/protovit.json \
+  --modes normal tent eata sar cotta \
           proto_imp_conf_adaptive_source_free_router_coverage_absolute \
   --corruptions all \
   --prototype-metrics \
@@ -114,9 +114,8 @@ python evaluate_robustness_dogs.py \
   --model /path/to/protopformer_checkpoint.pth \
   --data_dir /path/to/stanford_dogs_c \
   --clean_dir /path/to/stanford_dogs_clean \
-  --output /path/to/results/protopformer_seed0.json \
-  --seed 0 \
-  --modes normal tent eata sar \
+  --output /path/to/results/protopformer.json \
+  --modes normal tent eata sar cotta \
           proto_tta_adaptive_source_free_router_coverage_absolute \
   --corruptions all \
   --prototype-metrics \
@@ -134,9 +133,8 @@ cd ProtoLens
 python evaluate_robustness_amazonc.py \
   --model_path /path/to/protolens_checkpoint.pth \
   --data_dir /path/to/Amazon-C \
-  --output /path/to/results/protolens_seed0.json \
-  --seed 0 \
-  --methods baseline tent eata sar prototta \
+  --output /path/to/results/protolens.json \
+  --methods baseline tent eata sar cotta prototta \
   --proto_adaptive_lambda \
   --proto_gradient_normalize \
   --proto_adaptive_strategy source_free_router_coverage_absolute \
@@ -152,11 +150,10 @@ python -m ProtoPNetVLM.protopnet_tta.evaluate_robustness \
   --model /path/to/protopnet_checkpoint.pth \
   --data_dir /path/to/SICAPv2-C \
   --clean_data_dir /path/to/SICAPv2/test \
-  --output /path/to/results/protopnet_seed0.json \
+  --output /path/to/results/protopnet.json \
   --severity 5 \
   --batch_size 64 \
-  --seed 0 \
-  --modes Normal Tent EATA SAR MEMO \
+  --modes Normal Tent CoTTA EATA SAR MEMO \
           ProtoAbsoluteConsistencyCoverageRouter \
   --prototype-metrics \
   --track-efficiency
@@ -165,14 +162,36 @@ python -m ProtoPNetVLM.protopnet_tta.evaluate_robustness \
 ProtoS-ViT commands are documented in
 [`ProtoTTA/EXISTING_BACKBONES.md`](ProtoTTA/EXISTING_BACKBONES.md).
 
+## Label-free ProtoLens supervisor
+
+The text pipeline exports BEFORE/AFTER predictions and prototype evidence,
+scores disagreements without exposing target labels, and opens sealed targets
+only during final analysis:
+
+```bash
+cd ProtoLens
+python protolens_llm_export.py --task-id 0 \
+  --data-dir /path/to/Amazon-C \
+  --model-path /path/to/protolens_checkpoint.pth \
+  --output-dir /path/to/llm_run
+python protolens_llm_score.py --task-id 0 \
+  --output-dir /path/to/llm_run
+python protolens_llm_analyze.py --output-dir /path/to/llm_run
+```
+
+Repeat the export and scoring commands for task indices `0` through `19`.
+Generated evidence, scores, and sealed targets remain excluded from version
+control.
+
 ## Reproducibility controls
 
 - Each corruption/method run starts from a fresh checkpoint unless the
   corresponding entry point explicitly documents continuous adaptation.
-- Random seeds are applied to Python, NumPy, PyTorch, CUDA, and data ordering.
+- Deterministic backend settings and stable data ordering are used where the
+  underlying libraries support them.
 - Paired clean/corrupted evaluators validate sample count, label order, and
   sample identity before computing paired metrics.
-- Result files record method configuration, seed, stream order, and available
+- Result files record method configuration, stream order, and available
   dataset/checkpoint provenance.
 - Existing result files are resumed by default in several evaluators; use the
   documented overwrite or force flag when a clean rerun is required.
@@ -190,9 +209,13 @@ cd ProtoViT
 python -m unittest -v \
   test_failure_detection.py \
   test_fullset_vlm_gate.py \
-  test_paired_adaptation_supervision.py \
-  test_reasoned_adaptation_audit.py \
-  test_vlm_gate_diagnostics.py
+  test_paired_adaptation_supervision.py
+
+cd ..
+python -m unittest -v tta_baselines/test_cotta.py
+
+cd ProtoLens
+python -m unittest -v test_protolens_llm.py
 ```
 
 Generated datasets, checkpoints, result files, VLM boards, logs, caches, and

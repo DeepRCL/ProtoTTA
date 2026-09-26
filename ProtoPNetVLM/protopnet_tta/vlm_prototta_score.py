@@ -18,7 +18,6 @@ import torch
 
 from .vlm_prototta_common import (
     CORRUPTIONS,
-    SEEDS,
     VLM_BATCH_SIZE,
     VLM_MODEL,
     atomic_write_json,
@@ -26,28 +25,24 @@ from .vlm_prototta_common import (
     load_json,
     parse_and_validate_response,
     reject_label_bearing_payload,
-    task_for_index,
 )
 
 
-def verify_hardware(minimum_vram_gib: float = 90.0) -> dict[str, Any]:
+def verify_hardware(minimum_vram_gib: float = 0.0) -> dict[str, Any]:
     if not torch.cuda.is_available():
         raise RuntimeError("Qwen scoring requires CUDA")
-    if torch.cuda.device_count() != 1:
-        raise RuntimeError(
-            "scoring job must expose exactly one full accelerator; received "
-            f"{torch.cuda.device_count()} visible devices"
-        )
     properties = torch.cuda.get_device_properties(0)
     memory_gib = properties.total_memory / 1024**3
     name = properties.name
-    is_full_b200 = "B200" in name.upper() and memory_gib >= 150
-    if memory_gib < minimum_vram_gib and not is_full_b200:
+    if minimum_vram_gib > 0 and memory_gib < minimum_vram_gib:
         raise RuntimeError(
-            f"{name} has {memory_gib:.1f} GiB; require "
-            f">={minimum_vram_gib:g} GiB or a full B200"
+            f"{name} has {memory_gib:.1f} GiB; require >={minimum_vram_gib:g} GiB"
         )
-    return {"name": name, "total_memory_gib": memory_gib, "device_count": 1}
+    return {
+        "name": name,
+        "total_memory_gib": memory_gib,
+        "device_count": torch.cuda.device_count(),
+    }
 
 
 def load_qwen(model_name: str, torch_dtype: str = "bfloat16"):
@@ -314,26 +309,16 @@ def run(args: argparse.Namespace) -> Path:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--task-id", type=int)
-    parser.add_argument("--seed", type=int, choices=SEEDS)
-    parser.add_argument("--corruption", choices=CORRUPTIONS)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--corruption", choices=CORRUPTIONS, required=True)
     parser.add_argument("--model-name", default=VLM_MODEL)
     parser.add_argument("--max-new-tokens", type=int, default=4096)
     parser.add_argument("--torch-dtype", choices=("bfloat16", "float16"),
                         default="bfloat16")
-    parser.add_argument("--minimum-vram-gib", type=float, default=90.0)
+    parser.add_argument("--minimum-vram-gib", type=float, default=0.0)
     parser.add_argument("--vlm-batch-size", type=int, default=VLM_BATCH_SIZE)
     parser.add_argument("--score-tag", default="")
     args = parser.parse_args(argv)
-    if args.task_id is not None:
-        task_seed, task_corruption = task_for_index(args.task_id)
-        if args.seed is not None and args.seed != task_seed:
-            parser.error("--seed conflicts with --task-id")
-        if args.corruption is not None and args.corruption != task_corruption:
-            parser.error("--corruption conflicts with --task-id")
-        args.seed, args.corruption = task_seed, task_corruption
-    if args.seed is None or args.corruption is None:
-        parser.error("provide --task-id or both --seed and --corruption")
     if args.vlm_batch_size < 1:
         parser.error("--vlm-batch-size must be positive")
     if args.score_tag and any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in args.score_tag):

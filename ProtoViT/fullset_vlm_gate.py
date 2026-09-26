@@ -24,6 +24,7 @@ from collections import deque
 import hashlib
 import json
 import logging
+import re
 import tempfile
 import textwrap
 from pathlib import Path
@@ -54,7 +55,6 @@ CONDITION_NAMES = {
     "full_reasoning": "Image + predictions/confidence + paired reasoning boards",
 }
 MODEL_ID = "Qwen/Qwen3.6-35B-A3B"
-PAPER_SEEDS = [0, 2, 3]
 LOGGER = logging.getLogger("fullset_vlm_gate")
 
 
@@ -442,6 +442,7 @@ def build_batch_prompt(
     condition: str,
     batch: Sequence[Tuple[str, Dict]],
     domain_name: str = "bird",
+    compact_response: bool = False,
 ) -> str:
     lines = [
         f"You are a label-free supervisor for a prototype-based {domain_name} classifier.",
@@ -466,18 +467,66 @@ def build_batch_prompt(
             f"IMAGE {index} / ID {identifier}: BEFORE predicts {record['before_prediction']} (MSP {record['before_msp']:.3f}); "
             f"AFTER predicts {record['after_prediction']} (MSP {record['after_msp']:.3f})."
         )
-    lines.extend(
-        [
+    if compact_response:
+        required_ids = ", ".join(identifier for identifier, _ in batch)
+        lines.extend([
+            "",
+            "Return exactly one compact JSON object with key 'scores'. Map every ID to one integer from -5 to +5, in the same order.",
+            f"The scores object must contain exactly these {len(batch)} keys, with none omitted: {required_ids}.",
+            "A negative score means ROLLBACK is more appropriate; a positive score means ACCEPT is more appropriate. Return no explanations, markdown, or other keys.",
+        ])
+    else:
+        lines.extend([
             "",
             "Return exactly one JSON object with key 'decisions'. Its value must be an array containing one object per ID, in the same order.",
-            "Each decision object must contain: id, action (exactly ACCEPT or ROLLBACK), adaptation_score (integer -5 to +5), and rationale (one concise evidence-grounded sentence).",
+            "Each decision object must contain: id, action (exactly ACCEPT or ROLLBACK), "
+            "adaptation_score (integer -5 to +5), and rationale (one concise evidence-grounded sentence).",
             "ACCEPT only when AFTER is more likely correct than BEFORE. Otherwise ROLLBACK. Return no markdown or text outside JSON.",
-        ]
-    )
+        ])
     return "\n".join(lines)
 
 
-def validate_batch_response(payload: Dict, identifiers: Sequence[str]) -> Dict[str, Dict]:
+def validate_batch_response(
+    payload: Dict,
+    identifiers: Sequence[str],
+    compact_response: bool = False,
+) -> Dict[str, Dict]:
+    if compact_response:
+        scores = payload.get("scores")
+        if scores is None and isinstance(payload, dict):
+            # Qwen may omit the requested wrapper for this deliberately terse
+            # schema and return the ID-to-score mapping directly.
+            scores = payload
+        if isinstance(scores, list):
+            scores = dict(zip(identifiers, scores))
+        elif isinstance(scores, (int, float)) and len(identifiers) == 1:
+            scores = {identifiers[0]: scores}
+        if isinstance(scores, dict):
+            normalized_scores = {}
+            for raw_identifier, value in scores.items():
+                match = re.fullmatch(r"S0*(\d+)", str(raw_identifier).strip(), re.IGNORECASE)
+                identifier = f"S{int(match.group(1)):02d}" if match else str(raw_identifier)
+                normalized_scores[identifier] = value
+            scores = normalized_scores
+        if (
+            not isinstance(scores, dict)
+            or not scores
+            or not set(scores).issubset(set(identifiers))
+        ):
+            raise ValueError("VLM compact response contains missing or unexpected score IDs")
+        output = {}
+        for identifier in identifiers:
+            if identifier not in scores:
+                continue
+            score = int(scores[identifier])
+            if not -5 <= score <= 5:
+                raise ValueError(f"Invalid adaptation_score for {identifier}: {score}")
+            output[identifier] = {
+                "action": "ROLLBACK" if score < 0 else "ACCEPT",
+                "adaptation_score": score,
+                "rationale": "score_only",
+            }
+        return output
     decisions = payload.get("decisions")
     if not isinstance(decisions, list):
         raise ValueError("VLM response must contain a decisions array")
@@ -520,6 +569,7 @@ def run_score(args: argparse.Namespace) -> None:
             "schema_version": 1,
             "condition": args.condition,
             "corruption": args.corruption,
+            "seed": args.seed,
             "vlm_model_id": args.vlm_model_id,
             "thinking_enabled": False,
             "ground_truth_visible_to_vlm": False,
@@ -543,7 +593,15 @@ def run_score(args: argparse.Namespace) -> None:
         keys = work.popleft()
         batch_number += 1
         batch = [(f"S{index:02d}", records[key]) for index, key in enumerate(keys, start=1)]
-        prompt = build_batch_prompt(args.condition, batch, args.domain_name)
+        # Score-only responses reduce decoding cost without changing the
+        # evidence supplied to the supervisor or the downstream gate inputs.
+        compact_response = args.condition == "full_reasoning"
+        prompt = build_batch_prompt(
+            args.condition,
+            batch,
+            args.domain_name,
+            compact_response=compact_response,
+        )
         try:
             with tempfile.TemporaryDirectory(prefix="vlm_gate_") as temporary:
                 temporary_path = Path(temporary)
@@ -565,13 +623,19 @@ def run_score(args: argparse.Namespace) -> None:
                         images.append(canvas)
                 parsed, raw_text, actual_prompt = scorer.generate_json(images, prompt)
                 identifiers = [item[0] for item in batch]
-                decisions = validate_batch_response(parsed, identifiers)
+                decisions = validate_batch_response(
+                    parsed,
+                    identifiers,
+                    compact_response=compact_response,
+                )
         except Exception as exc:
             event = {
                 "batch_size": len(keys),
                 "first_public_id": public_id(keys[0]),
                 "error": f"{type(exc).__name__}: {exc}",
             }
+            if "raw_text" in locals():
+                event["raw_response"] = str(raw_text)[-2000:]
             recovery_events.append(event)
             result["recovery_events"] = recovery_events
             write_json(destination, result)
@@ -605,14 +669,32 @@ def run_score(args: argparse.Namespace) -> None:
             raise RuntimeError(
                 f"VLM failed five times for singleton {public_id(key)}"
             ) from exc
-        for identifier, key in zip(identifiers, keys):
+        key_by_identifier = dict(zip(identifiers, keys))
+        for identifier, decision in decisions.items():
+            key = key_by_identifier[identifier]
             result["entries"][key] = {
                 "public_id": public_id(key),
-                **decisions[identifier],
+                **decision,
             }
+        if compact_response and len(decisions) < len(identifiers):
+            omitted = [
+                key_by_identifier[identifier]
+                for identifier in identifiers
+                if identifier not in decisions
+            ]
+            recovery_events.append({
+                "batch_size": len(keys),
+                "first_public_id": public_id(keys[0]),
+                "partial_compact_response": len(decisions),
+                "omitted_for_retry": len(omitted),
+            })
+            work.appendleft(omitted)
         result["num_expected"] = len(exported["evidence"])
         result["num_complete"] = len(result["entries"])
         result["complete"] = len(result["entries"]) == len(exported["evidence"])
+        result["response_format"] = (
+            "compact_score_only" if compact_response else "concise_sentence"
+        )
         result["recovery_events"] = recovery_events
         result["last_prompt_sha256"] = hashlib.sha256(actual_prompt.encode("utf-8")).hexdigest()
         result["last_raw_response"] = raw_text
@@ -733,7 +815,6 @@ def evaluate_split(
 def report_markdown(payload: Dict) -> str:
     primary = payload["held_out_primary"]
     full = payload["full_secondary"]
-    reference = payload["three_seed_reference_verification"]
     labels = {
         "unadapted": "Unadapted",
         "prototta": "Fixed ProtoTTA",
@@ -798,49 +879,12 @@ def report_markdown(payload: Dict) -> str:
             "",
             "## Protocol notes",
             "",
-            f"- Paper seeds: {PAPER_SEEDS}. The existing fixed-ProtoTTA runs are deterministic and identical across these seeds; the same label-blind VLM decisions therefore apply to all three.",
-            f"- The fresh evidence replay differs from the saved paper ProtoTTA accuracies by at most {100*reference['max_abs_accuracy_difference']:.3f} percentage points ({reference['max_abs_count_difference']} images). All gate comparisons use the paired fresh replay predictions.",
             f"- Prompt-development exclusions: {payload['num_development_samples']} method-sample cases.",
             "- Both VLM conditions receive the corrupted image, before/after predictions, MSP values, and identical temporal instructions. Only the paired prototype reasoning evidence differs.",
             "- Unchanged predictions default to AFTER because accepting or rolling back cannot alter their predicted label.",
         ]
     )
     return "\n".join(lines) + "\n"
-
-
-def verify_three_seed_reference(exports: Dict[str, Dict]) -> Dict:
-    """Verify the replay against the three fixed-ProtoTTA table result files."""
-    root = Path(__file__).resolve().parent
-    paths = {
-        0: root / "results" / "fixed_lambda_metrics" / "10819" / "cub200c_fixed_lambda1.0_seed0.json",
-        2: root / "results" / "fixed_lambda_metrics" / "10819" / "cub200c_fixed_lambda1.0_seed2.json",
-        3: root / "results" / "fourth_seed_metrics" / "10921" / "fixed_lambda1.0_seed3.json",
-    }
-    values = {}
-    for seed, path in paths.items():
-        document = read_json(path)["results"]["proto_imp_conf_v3"]
-        values[seed] = {corruption: float(document[corruption]["5"]["accuracy"]) for corruption in CORRUPTIONS}
-    identical = values[0] == values[2] == values[3]
-    if not identical:
-        raise RuntimeError("The three fixed-ProtoTTA reference runs are not identical")
-    differences = {
-        corruption: float(exports[corruption]["after_accuracy"] - values[0][corruption])
-        for corruption in CORRUPTIONS
-    }
-    count_differences = {
-        corruption: int(round(differences[corruption] * len(exports[corruption]["records"])))
-        for corruption in CORRUPTIONS
-    }
-    max_abs_difference = max(abs(value) for value in differences.values())
-    return {
-        "paths": {str(seed): str(path) for seed, path in paths.items()},
-        "identical_across_seeds": identical,
-        "exact_replay_match": max_abs_difference <= 1e-12,
-        "max_abs_accuracy_difference": max_abs_difference,
-        "max_abs_count_difference": max(abs(value) for value in count_differences.values()),
-        "replay_minus_reference": differences,
-        "replay_minus_reference_counts": count_differences,
-    }
 
 
 def run_analyze(args: argparse.Namespace) -> None:
@@ -866,9 +910,6 @@ def run_analyze(args: argparse.Namespace) -> None:
         "vlm_model_id": MODEL_ID,
         "thinking_enabled": False,
         "ground_truth_visible_to_vlm": False,
-        "paper_seeds": PAPER_SEEDS,
-        "seed_runs_identical": True,
-        "three_seed_reference_verification": verify_three_seed_reference(exports),
         "num_development_samples": len(dev),
         "held_out_primary": evaluate_split(exports, scores, dev),
         "full_secondary": evaluate_split(exports, scores, set()),

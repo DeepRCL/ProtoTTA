@@ -1,6 +1,6 @@
 """Export label-free BEFORE/AFTER examples and ProtoPNet reasoning boards.
 
-One invocation handles exactly one seed/corruption stream.  The source and
+One invocation handles exactly one corruption stream.  The source and
 ProtoTTA models are freshly loaded, and ProtoTTA is continuous for the whole
 corruption.  Its returned logits and captured spatial distances come from the
 same pre-update forward used by the normal adaptation wrapper.
@@ -38,23 +38,17 @@ from .settings import img_size
 from .vlm_prototta_common import (
     CLASS_NAMES,
     CORRUPTIONS,
-    SEEDS,
     atomic_write_json,
     load_json,
     sha256_file,
     sha256_lines,
-    task_for_index,
 )
 
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL = ROOT / "saved_models/vgg19_bn/sicapv2_002/epoch_20_last_5.pth"
-DEFAULT_DATA = ROOT / "datasets/SICAPv2_c_rebuilt_seed0"
+DEFAULT_DATA = ROOT / "datasets/SICAPv2-C"
 DEFAULT_PROTOTYPES = ROOT / "saved_models/vgg19_bn/sicapv2_002/img/epoch-20"
-DEFAULT_BASELINE = (
-    ROOT.parent / "protopnet_table3_seed_specific_tmux_20260906T192746Z_3582237"
-    / "table3/raw"
-)
 METHOD = "ProtoAbsoluteConsistencyCoverageRouter"
 SOURCE_METHOD = "Normal"
 
@@ -538,26 +532,16 @@ def export_stream(args: argparse.Namespace) -> Path:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--task-id", type=int)
-    parser.add_argument("--seed", type=int, choices=SEEDS)
-    parser.add_argument("--corruption", choices=CORRUPTIONS)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--corruption", choices=CORRUPTIONS, required=True)
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA)
     parser.add_argument("--prototype-dir", type=Path, default=DEFAULT_PROTOTYPES)
-    parser.add_argument("--baseline-dir", type=Path, default=DEFAULT_BASELINE)
+    parser.add_argument("--baseline-dir", type=Path, required=True)
     parser.add_argument("--gpuid", default="0")
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
-    if args.task_id is not None:
-        task_seed, task_corruption = task_for_index(args.task_id)
-        if args.seed is not None and args.seed != task_seed:
-            parser.error("--seed conflicts with --task-id")
-        if args.corruption is not None and args.corruption != task_corruption:
-            parser.error("--corruption conflicts with --task-id")
-        args.seed, args.corruption = task_seed, task_corruption
-    if args.seed is None or args.corruption is None:
-        parser.error("provide --task-id or both --seed and --corruption")
     return args
 
 

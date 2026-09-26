@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-SEEDS = (0, 2, 3)
 CORRUPTIONS = (
     "gaussian_noise", "shot_noise", "impulse_noise", "speckle_noise",
     "gaussian_blur", "defocus_blur", "fog", "frost",
@@ -92,14 +91,6 @@ def atomic_write_json(path: str | Path, payload: Any) -> None:
 def load_json(path: str | Path) -> Any:
     with Path(path).open(encoding="utf-8") as handle:
         return json.load(handle)
-
-
-def task_for_index(task_id: int) -> tuple[int, str]:
-    if not 0 <= task_id < len(SEEDS) * len(CORRUPTIONS):
-        raise ValueError(f"task id {task_id} is outside 0..38")
-    return SEEDS[task_id // len(CORRUPTIONS)], CORRUPTIONS[
-        task_id % len(CORRUPTIONS)
-    ]
 
 
 def reject_label_bearing_payload(value: Any, location: str = "root") -> None:
