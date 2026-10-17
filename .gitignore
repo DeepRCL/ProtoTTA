@@ -141,4 +141,3 @@ slurm_*.sh
 iclr2026_conference (5).tex
 check_cuda.py
 Files/ProtoTTA-Poster.png
-protosvit/slurm*.out

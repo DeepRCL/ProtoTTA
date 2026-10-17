@@ -67,14 +67,6 @@ MODEL_CONFIGS = [
         "mode_key": "proto_tta",
     },
     {
-        "key": "protosvit",
-        "name": "ProtoSViT",
-        "dataset": "Stanford Cars-C",
-        "dir": REPO_ROOT / "protosvit" / "results" / "lambda_sweep",
-        "file_glob": "cars_c_lambda*.json",
-        "mode_key": "proto_tta",
-    },
-    {
         "key": "protolens",
         "name": "ProtoLens",
         "dataset": "Amazon-C",

@@ -1,16 +1,16 @@
 # Existing Backbones and Run Commands
 
-This page is intentionally separate from the generic developer guide. The files below are the **current paper-specific implementations** in this repository.
+These are the four paper-specific implementations. For a new model, prefer
+the reusable [`ProtoTTAAdapter`](./adapter.py) instead of copying an entire
+backbone directory.
 
-## ProtoViT
+## ProtoViT / CUB-200-C
 
 Main files:
 
 - [`ProtoViT/run_inference.py`](../ProtoViT/run_inference.py)
 - [`ProtoViT/evaluate_robustness.py`](../ProtoViT/evaluate_robustness.py)
 - [`ProtoViT/proto_entropy.py`](../ProtoViT/proto_entropy.py)
-
-Example:
 
 ```bash
 cd ProtoViT
@@ -24,15 +24,13 @@ python run_inference.py \
   --adaptation-mode layernorm_attn_bias
 ```
 
-## ProtoLens
+## ProtoLens / Amazon-C
 
 Main files:
 
 - [`ProtoLens/run_inference_amazon_c.py`](../ProtoLens/run_inference_amazon_c.py)
 - [`ProtoLens/evaluate_robustness_amazonc.py`](../ProtoLens/evaluate_robustness_amazonc.py)
 - [`ProtoLens/proto_tta.py`](../ProtoLens/proto_tta.py)
-
-Example:
 
 ```bash
 cd ProtoLens
@@ -45,15 +43,13 @@ python run_inference_amazon_c.py \
   --sigmoid_temperature 5.0
 ```
 
-## ProtoPFormer
+## ProtoPFormer / Stanford Dogs-C
 
 Main files:
 
 - [`ProtoPFormer/run_inference_dogs.py`](../ProtoPFormer/run_inference_dogs.py)
 - [`ProtoPFormer/evaluate_robustness_dogs.py`](../ProtoPFormer/evaluate_robustness_dogs.py)
 - [`ProtoPFormer/proto_tta.py`](../ProtoPFormer/proto_tta.py)
-
-Example:
 
 ```bash
 cd ProtoPFormer
@@ -66,41 +62,22 @@ python run_inference_dogs.py \
   --severity 5
 ```
 
-## ProtoS-ViT
+## ProtoPNet / SICAPv2-C
 
 Main files:
 
-- [`protosvit/run_inference_cars_c.py`](../protosvit/run_inference_cars_c.py)
-- [`protosvit/evaluate_robustness_cars_c.py`](../protosvit/evaluate_robustness_cars_c.py)
+- [`ProtoPNetVLM/protopnet_tta/evaluate_robustness.py`](../ProtoPNetVLM/protopnet_tta/evaluate_robustness.py)
+- [`ProtoPNetVLM/protopnet_tta/proto_entropy_enhanced.py`](../ProtoPNetVLM/protopnet_tta/proto_entropy_enhanced.py)
+- [`ProtoPNetVLM/protopnet_tta/README.md`](../ProtoPNetVLM/protopnet_tta/README.md)
 
-Example:
-
-```bash
-cd protosvit
-python run_inference_cars_c.py \
-  --ckpt /path/to/epoch.ckpt \
-  --cars_c_dir /path/to/cars_c \
-  --modes proto_tta proto_tta_plus \
-  --corruption gaussian_noise \
-  --severity 5
-```
-
-## ProtoPNet-style Modules
-
-Main files:
-
-- [`protopnet/proto_entropy.py`](../protopnet/proto_entropy.py)
-- [`protopnet/proto_entropy_enchanced.py`](../protopnet/proto_entropy_enchanced.py)
-
-These files are module-level implementations rather than a full standalone training/evaluation package in this release.
+The full pipeline expects the upstream `proto_baseline` package on
+`PYTHONPATH`. Compact ProtoPNet-oriented adaptation modules are also available
+under [`protopnet/`](../protopnet).
 
 ## VLM Explainability
 
-Main files:
+The optional VLM evaluation is implemented in:
 
 - [`ProtoViT/vlm_eval.py`](../ProtoViT/vlm_eval.py)
 - [`ProtoViT/VLM/vlm.py`](../ProtoViT/VLM/vlm.py)
-
-Use the developer-facing explanation in:
-
 - [`VLM_EXPLAINABILITY.md`](./VLM_EXPLAINABILITY.md)

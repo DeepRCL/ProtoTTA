@@ -1,218 +1,203 @@
 # ProtoTTA: Prototype-Guided Test-Time Adaptation
 
-[![OpenReview](https://img.shields.io/badge/Paper-PDF-B31B1B.svg)](https://iclr.cc/virtual/2026/10020241)
-[![arXiv](https://img.shields.io/badge/arXiv-Paper-<COLOR>.svg)](https://arxiv.org/abs/2604.15494)
-[![Poster](https://img.shields.io/badge/Poster-PDF-4c1.svg)](https://github.com/DeepRCL/ProtoTTA/blob/main/Files/ProtoTTA-Poster-v3.pdf)
+[![OpenReview](https://img.shields.io/badge/Paper-OpenReview-B31B1B.svg)](https://iclr.cc/virtual/2026/10020241)
+[![arXiv](https://img.shields.io/badge/arXiv-2604.15494-b31b1b.svg)](https://arxiv.org/abs/2604.15494)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.x-ee4c2c.svg)](https://pytorch.org/)
 
-Official code repository for **ProtoTTA: Prototype-Guided Test-Time Adaptation**.
+Official implementation of **ProtoTTA: Prototype-Guided Test-Time
+Adaptation**. ProtoTTA adapts a prototype-based model on unlabeled test
+batches by sharpening reliable prototype evidence while updating only a small,
+explicitly selected part of the model.
 
-This repository packages our ProtoTTA implementations across multiple prototype-based backbones, together with robustness evaluation scripts, prototype-level interpretability metrics, and a vision-language model (VLM) analysis pipeline for studying adaptation dynamics.
-<img width="100%" alt="VLM2 (1)" src="https://github.com/user-attachments/assets/498165fc-dcfb-454b-86fb-917b30aec308" />
+This repository has two entry paths:
 
-## Start Here
-<img width="100%" src="https://github.com/user-attachments/assets/95239449-27fa-4209-816f-e9f8bc5a3d1f">
+- **Add ProtoTTA to your model:** use the small reusable package in
+  [`ProtoTTA/`](./ProtoTTA).
+- **Reproduce an existing experiment:** use the backbone-specific code for
+  ProtoViT, ProtoPNet, ProtoPFormer, or ProtoLens.
 
-This repository supports two main use cases.
+## Add ProtoTTA to a New Model
 
-### Add ProtoTTA or ProtoTTA+ to a new model
+The reusable adapter has no dependency on the paper datasets or model
+repositories. It requires PyTorch and a model that exposes two tensors:
 
-Start with the developer kit in [`ProtoTTA/README.md`](./ProtoTTA/README.md).
-
-- Model integration guide: [`ProtoTTA/ADDING_NEW_MODEL.md`](./ProtoTTA/ADDING_NEW_MODEL.md)
-- Generic implementation skeleton: [`ProtoTTA/templates/prototta_adapter.py`](./ProtoTTA/templates/prototta_adapter.py)
-- Interpretability metrics guide: [`ProtoTTA/INTERPRETABILITY_METRICS.md`](./ProtoTTA/INTERPRETABILITY_METRICS.md)
-- VLM explainability guide: [`ProtoTTA/VLM_EXPLAINABILITY.md`](./ProtoTTA/VLM_EXPLAINABILITY.md)
-
-
-
-### Run the existing paper implementations
-
-Use the backbone-specific command guide in [`ProtoTTA/EXISTING_BACKBONES.md`](./ProtoTTA/EXISTING_BACKBONES.md).
-
-## Abstract
-
-Deep networks that rely on prototypes, interpretable representations that can be related to the model input, have gained significant attention for balancing high accuracy with inherent interpretability, which makes them suitable for critical domains such as healthcare. However, these models are limited by their reliance on training data, which hampers their robustness to distribution shifts. While test-time adaptation (TTA) improves the robustness of deep networks by updating parameters and statistics, the prototypes of interpretable models have not been explored for this purpose. We introduce **ProtoTTA**, a general framework for prototypical models that leverages intermediate prototype signals rather than relying solely on model outputs. ProtoTTA minimizes the entropy of the prototype-similarity distribution to encourage more confident and prototype-specific activations on shifted data. To maintain stability, we employ geometric filtering to restrict updates to samples with reliable prototype activations, regularized by prototype-importance weights and model-confidence scores. Experiments across diverse prototypical backbones and benchmarks spanning fine-grained vision, histopathology, and NLP demonstrate that ProtoTTA improves robustness over standard output entropy minimization while restoring correct semantic focus in prototype activations. We also introduce novel interpretability metrics and a VLM-based evaluation framework to explain TTA dynamics.
-
-## Repository Scope
-
-This public release focuses on the ProtoTTA code paths that are needed to reproduce and extend the paper:
-
-- [`ProtoTTA/`](./ProtoTTA): developer-facing guide for adding ProtoTTA / ProtoTTA+ to a new model, implementing metrics, and extending VLM explainability.
-- [`ProtoViT/`](./ProtoViT): ProtoViT-based image classification experiments on CUB-200-C, including the main `run_inference.py` and `evaluate_robustness.py` workflows, the prototype metrics, and the VLM evaluation code.
-- [`ProtoLens/`](./ProtoLens): ProtoLens-based NLP robustness experiments on Amazon-C.
-- [`ProtoPFormer/`](./ProtoPFormer): ProtoPFormer-based image robustness experiments on Stanford Dogs-C.
-- [`ProtoPNetVLM/protopnet_tta/`](./ProtoPNetVLM/protopnet_tta): full ProtoPNet/SICAPv2-C robustness and label-blind VLM evaluation pipeline.
-- [`protosvit/`](./protosvit): ProtoS-ViT-based robustness experiments on Stanford Cars-C, including `ProtoTTA+`.
-- [`protopnet/`](./protopnet): ProtoPNet-style prototype adaptation modules, including the base ProtoTTA objective and an enhanced variant.
-- [`protovit_env.yml`](./protovit_env.yml): main environment file for the ProtoViT stack.
-- [`vlm_environment.yml`](./vlm_environment.yml): environment file for the VLM evaluation pipeline.
-- [`flsh_att_environment.yml`](./flsh_att_environment.yml): optional environment for Flash Attention based VLM runs.
-
-## Core Contributions
-
-1. **Prototype-aware test-time adaptation** that operates on intermediate prototype signals instead of only output entropy.
-2. **Geometric filtering and stability weighting** to make online adaptation more reliable under heavy corruption.
-3. **Adaptive loss routing** between prototype- and output-level entropy using source-free activation evidence.
-4. **Cross-backbone implementations** spanning ProtoViT, ProtoPNet, ProtoLens, ProtoPFormer, and ProtoS-ViT.
-5. **Interpretability-aware evaluation** through prototype consistency/alignment metrics and VLM-based reasoning analysis.
-
-## Main Entry Points
-
-- [`ProtoTTA/README.md`](./ProtoTTA/README.md): primary developer documentation for future users extending ProtoTTA.
-- [`ProtoTTA/ADDING_NEW_MODEL.md`](./ProtoTTA/ADDING_NEW_MODEL.md): how to add ProtoTTA / ProtoTTA+ to a new architecture.
-- [`ProtoTTA/INTERPRETABILITY_METRICS.md`](./ProtoTTA/INTERPRETABILITY_METRICS.md): how to implement PAC, PCA, PCA-W, sparsity, calibration, and related metrics.
-- [`ProtoTTA/VLM_EXPLAINABILITY.md`](./ProtoTTA/VLM_EXPLAINABILITY.md): how to adapt the VLM-based explainability pipeline for a new model.
-- [`ProtoTTA/EXISTING_BACKBONES.md`](./ProtoTTA/EXISTING_BACKBONES.md): commands and pointers for ProtoViT, ProtoLens, ProtoPFormer, ProtoS-ViT, and ProtoPNet-style code paths already in this repo.
-
-## Repository Layout
-
-```text
-.
-├── README.md
-├── ProtoTTA/
-│   ├── README.md
-│   ├── ADDING_NEW_MODEL.md
-│   ├── INTERPRETABILITY_METRICS.md
-│   ├── VLM_EXPLAINABILITY.md
-│   ├── EXISTING_BACKBONES.md
-│   └── templates/prototta_adapter.py
-├── ProtoViT/
-│   ├── run_inference.py
-│   ├── evaluate_robustness.py
-│   ├── prototype_tta_metrics.py
-│   ├── enhanced_prototype_metrics.py
-│   ├── vlm_eval.py
-│   └── VLM/vlm.py
-├── ProtoLens/
-│   ├── run_inference_amazon_c.py
-│   ├── evaluate_robustness_amazonc.py
-│   ├── proto_tta.py
-│   └── prototype_metrics.py
-├── ProtoPFormer/
-│   ├── run_inference_dogs.py
-│   ├── evaluate_robustness_dogs.py
-│   ├── proto_tta.py
-│   ├── prototype_tta_metrics.py
-│   └── enhanced_prototype_metrics.py
-├── ProtoPNetVLM/protopnet_tta/
-│   ├── evaluate_robustness.py
-│   ├── proto_entropy_enhanced.py
-│   ├── prototype_metrics.py
-│   └── vlm_prototta_{export,score,analyze}.py
-├── protosvit/
-│   ├── run_inference_cars_c.py
-│   └── evaluate_robustness_cars_c.py
-└── protopnet/
-    ├── proto_entropy.py
-    └── proto_entropy_enchanced.py
+```python
+{
+    "logits": logits,                       # [batch, classes]
+    "prototype_scores": prototype_scores,   # [batch, prototypes]
+}
 ```
+
+Sub-prototypes with shape `[batch, prototypes, sub_prototypes]` are supported.
+An optional `filter_scores` tensor can provide a separate geometric reliability
+signal.
+
+### 1. Select the parameters that may adapt
+
+```python
+from ProtoTTA import configure_model
+
+parameters, names = configure_model(
+    model,
+    adapt_layer_norm=True,
+    adapt_batch_norm=True,
+    # Optional architecture-specific additions:
+    extra_parameter_patterns=("*add_on_layers*",),
+)
+optimizer = torch.optim.Adam(parameters, lr=1e-4)
+print("Adapting:", names)
+```
+
+All other parameters are frozen. BatchNorm running statistics remain frozen.
+
+### 2. Wrap the model
+
+For class-specific prototypes, provide an identity matrix of shape
+`[prototypes, classes]`:
+
+```python
+from ProtoTTA import ProtoTTAAdapter, ProtoTTAConfig
+
+adapted_model = ProtoTTAAdapter(
+    model,
+    optimizer,
+    prototype_class_identity=model.prototype_class_identity,
+    config=ProtoTTAConfig(
+        score_mapping="cosine",
+        geometric_threshold=0.3,
+        output_entropy_weight=0.0,
+    ),
+)
+```
+
+For shared prototypes, pass the frozen classifier matrix with shape
+`[classes, prototypes]` as `classifier_weights`. For tuple/custom model
+outputs, pass an `output_extractor` callback.
+
+### 3. Run online adaptation
+
+```python
+for images, _ in test_loader:
+    output = adapted_model(images)  # predicts, then performs one update
+    predictions = output["logits"].argmax(dim=1)
+
+# Restore the source model before a new domain/corruption.
+adapted_model.reset()
+```
+
+Start from the complete runnable medical example:
+
+```bash
+python -m ProtoTTA.examples.medical_model
+python -m unittest -v ProtoTTA.tests.test_adapter
+```
+
+- Runnable example: [`ProtoTTA/examples/medical_model.py`](./ProtoTTA/examples/medical_model.py)
+- API and quick start: [`ProtoTTA/README.md`](./ProtoTTA/README.md)
+- Detailed porting guide: [`ProtoTTA/ADDING_NEW_MODEL.md`](./ProtoTTA/ADDING_NEW_MODEL.md)
+- Copy-friendly template: [`ProtoTTA/templates/prototta_adapter.py`](./ProtoTTA/templates/prototta_adapter.py)
+
+## Choosing the Score Mapping
+
+ProtoTTA computes binary entropy in probability space. Set `score_mapping` to
+match the tensor returned by your model:
+
+| Native prototype value | Configuration | Mapping |
+|---|---|---|
+| Cosine similarity in `[-1, 1]` | `"cosine"` | `(score + 1) / 2` |
+| Unbounded similarity/logit | `"similarity"` | `sigmoid(temperature * score)` |
+| ProtoPNet-style squared distance | `"distance"` | `log((d+1)/(d+1e-4)) / 9` |
+| Already a probability | `"probability"` | Clamp to `(eps, 1-eps)` |
+
+If your model uses a different activation, provide `score_mapper=lambda scores:
+...` to `ProtoTTAAdapter`.
+
+## Medical-Model Recommendations
+
+For a new medical prototype model, begin conservatively:
+
+- adapt normalization affine parameters and, if needed, the small prototype
+  projection/add-on block;
+- keep the encoder, classifier, and prototype identities frozen initially;
+- use one optimizer step per batch and a low learning rate (`1e-5` to `1e-4`);
+- reset to the source checkpoint between independent hospitals, scanners, or
+  corruption domains;
+- validate the geometric threshold using source/validation data, never test
+  labels;
+- report the accepted-sample rate from `adapted_model.stats` alongside
+  accuracy or AUROC.
+
+For distance-based ProtoPNet-style medical models, use
+`score_mapping="distance"`. The SICAPv2 integration under
+[`ProtoPNetVLM/protopnet_tta/`](./ProtoPNetVLM/protopnet_tta) is the closest
+full medical reference.
+
+## Method Summary
+
+For each unlabeled test batch, ProtoTTA:
+
+1. obtains the model pseudo-label and prototype evidence;
+2. selects prototypes associated with the pseudo-label;
+3. rejects samples without sufficient prototype support;
+4. minimizes binary entropy over the selected prototype probabilities;
+5. optionally weights prototypes by classifier importance and samples by
+   prediction confidence;
+6. updates only the parameters selected by `configure_model`.
+
+`output_entropy_weight=0` uses the prototype objective alone. A value in
+`(0, 1]` blends prototype entropy with ordinary output entropy.
+
+## Paper Implementations
+
+The paper evaluates four prototype-based backbones:
+
+| Backbone | Benchmark | Main directory |
+|---|---|---|
+| ProtoViT | CUB-200-C | [`ProtoViT/`](./ProtoViT) |
+| ProtoPNet | SICAPv2-C | [`ProtoPNetVLM/protopnet_tta/`](./ProtoPNetVLM/protopnet_tta) |
+| ProtoPFormer | Stanford Dogs-C | [`ProtoPFormer/`](./ProtoPFormer) |
+| ProtoLens | Amazon-C | [`ProtoLens/`](./ProtoLens) |
+
+Commands and implementation pointers are collected in
+[`ProtoTTA/EXISTING_BACKBONES.md`](./ProtoTTA/EXISTING_BACKBONES.md).
+
+## Evaluation and Explainability
+
+- [`ProtoTTA/INTERPRETABILITY_METRICS.md`](./ProtoTTA/INTERPRETABILITY_METRICS.md)
+  explains PAC, PCA/PCA-W, sparsity, calibration, and prediction stability.
+- [`ProtoTTA/VLM_EXPLAINABILITY.md`](./ProtoTTA/VLM_EXPLAINABILITY.md)
+  describes the optional VLM evaluation workflow.
 
 ## Installation
 
-Because this repository combines several prototype-model codebases, dependencies are partially backbone-specific. A practical starting point is:
+For the reusable adapter, an existing PyTorch environment is sufficient:
 
 ```bash
-conda env create -f protovit_env.yml
-conda activate protovit
+git clone git@github.com:DeepRCL/ProtoTTA.git
+cd ProtoTTA
+python -m pip install -e .
+python -m unittest -v ProtoTTA.tests.test_adapter
 ```
 
-For the VLM analysis pipeline:
+To use the adapter from another repository, install this checkout in that
+repository's environment with `python -m pip install -e /path/to/ProtoTTA`.
 
-```bash
-conda env create -f vlm_environment.yml
-conda activate echofar
-```
-
-If you plan to run the large Qwen-based VLM setup in [`ProtoViT/VLM/vlm.py`](./ProtoViT/VLM/vlm.py), the Flash Attention environment in [`flsh_att_environment.yml`](./flsh_att_environment.yml) is also provided.
-
-## ProtoTTA and ProtoTTA+
-
-**ProtoTTA** is the main method described in the paper. Across the provided backbones, it consistently follows the same high-level recipe:
-
-1. obtain prototype activations or similarities,
-2. select reliable samples using geometric filtering,
-3. identify target prototypes from the pseudo-label,
-4. minimize prototype-level binary entropy,
-5. optionally weight updates by prototype importance and prediction confidence.
-
-Key implementation files:
-
-- [`ProtoViT/proto_entropy.py`](./ProtoViT/proto_entropy.py)
-- [`ProtoLens/proto_tta.py`](./ProtoLens/proto_tta.py)
-- [`ProtoPFormer/proto_tta.py`](./ProtoPFormer/proto_tta.py)
-- [`protosvit/run_inference_cars_c.py`](./protosvit/run_inference_cars_c.py)
-- [`protopnet/proto_entropy.py`](./protopnet/proto_entropy.py)
-
-**ProtoTTA+** is the enhanced variant included in this release for settings where a hybrid loss is useful. In the current codebase, the clearest public entry points are:
-
-- [`protosvit/run_inference_cars_c.py`](./protosvit/run_inference_cars_c.py): `proto_tta_plus`, which blends prototype entropy with logit entropy.
-- [`protosvit/evaluate_robustness_cars_c.py`](./protosvit/evaluate_robustness_cars_c.py): pre-defined `ProtoTTA+` method configurations.
-- [`protopnet/proto_entropy_enchanced.py`](./protopnet/proto_entropy_enchanced.py): enhanced ProtoPNet-oriented variant with hybrid loss and extra stability controls.
-
-The current experimental implementation also supports an adaptive controller
-that changes the prototype/output loss balance from source-free prototype
-activation evidence. The backbone-specific implementations and CLI controls
-are in `ProtoViT/proto_entropy.py`, `ProtoLens/proto_tta.py`,
-`ProtoPFormer/proto_tta.py`, and
-`ProtoPNetVLM/protopnet_tta/proto_entropy_enhanced.py`.
-
-For a generic implementation guide for new models, start with [`ProtoTTA/README.md`](./ProtoTTA/README.md), then use [`ProtoTTA/ADDING_NEW_MODEL.md`](./ProtoTTA/ADDING_NEW_MODEL.md).
-
-## Developer Documentation
-
-The top-level README is intentionally high-level. The detailed developer-facing documentation lives in the `ProtoTTA` folder:
-
-- [`ProtoTTA/README.md`](./ProtoTTA/README.md): overview of the developer kit.
-- [`ProtoTTA/ADDING_NEW_MODEL.md`](./ProtoTTA/ADDING_NEW_MODEL.md): integration workflow for a new model.
-- [`ProtoTTA/INTERPRETABILITY_METRICS.md`](./ProtoTTA/INTERPRETABILITY_METRICS.md): PAC, PCA, PCA-W, sparsity, calibration, and adaptation-process metrics.
-- [`ProtoTTA/VLM_EXPLAINABILITY.md`](./ProtoTTA/VLM_EXPLAINABILITY.md): explainable TTA with VLM evidence and scoring.
-- [`ProtoTTA/EXISTING_BACKBONES.md`](./ProtoTTA/EXISTING_BACKBONES.md): current backbone-specific run commands and file pointers.
-
-## Metrics and Explainability
-
-The repository includes dedicated code for evaluating not just accuracy, but also how adaptation changes prototype behavior:
-
-- [`ProtoViT/prototype_tta_metrics.py`](./ProtoViT/prototype_tta_metrics.py): PAC, PCA, and sparsity-oriented metrics.
-- [`ProtoViT/enhanced_prototype_metrics.py`](./ProtoViT/enhanced_prototype_metrics.py): weighted PCA, calibration agreement, class-contribution change, and related diagnostics.
-- [`ProtoViT/efficiency_metrics.py`](./ProtoViT/efficiency_metrics.py): runtime and adaptation-efficiency tracking.
-- [`ProtoLens/prototype_metrics.py`](./ProtoLens/prototype_metrics.py): NLP-side prototype metrics.
-- [`ProtoPFormer/prototype_tta_metrics.py`](./ProtoPFormer/prototype_tta_metrics.py): prototype metrics for ProtoPFormer.
-- [`ProtoPFormer/enhanced_prototype_metrics.py`](./ProtoPFormer/enhanced_prototype_metrics.py): extended interpretability metrics for ProtoPFormer.
-- [`protosvit/evaluate_robustness_cars_c.py`](./protosvit/evaluate_robustness_cars_c.py): table-ready metrics for ProtoS-ViT, including PAC, weighted alignment, prediction stability, and selection rate.
-
-For the generic metric design and implementation guidance, see [`ProtoTTA/INTERPRETABILITY_METRICS.md`](./ProtoTTA/INTERPRETABILITY_METRICS.md).
-
-## VLM Evaluation
-
-The VLM analysis pipeline is an important part of this release and is kept in the ProtoViT stack:
-
-- [`ProtoViT/vlm_eval.py`](./ProtoViT/vlm_eval.py): main VLM-based evaluation script for qualitative and quantitative reasoning analysis.
-- [`ProtoViT/summarize_vlm_eval.py`](./ProtoViT/summarize_vlm_eval.py): result summarization utilities.
-- [`ProtoViT/VLM/vlm.py`](./ProtoViT/VLM/vlm.py): low-level VLM loading example.
-
-This part of the repository is designed to study whether ProtoTTA restores human-aligned semantic focus under distribution shift, and how the proposed prototype metrics correlate with VLM-rated reasoning quality.
-
-For the generic developer guide for explainable TTA, see [`ProtoTTA/VLM_EXPLAINABILITY.md`](./ProtoTTA/VLM_EXPLAINABILITY.md).
-
-## Repository Hygiene
-
-- This release intentionally centers the ProtoTTA code paths above and excludes local experiment artifacts, datasets, checkpoints, paper drafts, generated VLM boards, and cluster-specific launch files.
-- Reproduction commands use explicit data, checkpoint, output, and seed arguments; generated outputs record the configuration and provenance needed for later checks.
+The paper backbones have different upstream dependencies. Use
+[`protovit_env.yml`](./protovit_env.yml) as the starting environment and read
+the relevant backbone README before running its evaluation script.
 
 ## Citation
-
-If you find this repository useful, please cite the paper:
 
 ```bibtex
 @inproceedings{abootorabiprototta,
   title={ProtoTTA: Prototype-Guided Test-Time Adaptation},
-  author={Abootorabi, Mohammad Mahdi and Mousavi, Parvin and Abolmaesumi, Purang and Shelhamer, Evan},
+  author={Abootorabi, Mohammad Mahdi and Mousavi, Parvin and
+          Abolmaesumi, Purang and Shelhamer, Evan},
   booktitle={Third Workshop on Test-Time Updates (Main Track)}
 }
 ```
 
 ## Contact
 
-For questions, please contact `mahdi.abootorabi2@gmail.com`.
+For questions, open a GitHub issue or contact `mahdi.abootorabi2@gmail.com`.
