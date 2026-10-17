@@ -56,6 +56,9 @@ import proto_tta
 import adapt_utils
 from prototype_metrics import ProtoLensMetricsEvaluator, EfficiencyTracker
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tta_baselines import CoTTA, TokenMaskTransform
+
 def seed_everything(seed):
     """Seed each independent method/corruption evaluation reproducibly."""
     random.seed(seed)
@@ -437,6 +440,31 @@ def setup_tent(model, adaptation_mode):
     return tent.Tent(model, optimizer, steps=cfg.OPTIM.STEPS, episodic=cfg.MODEL.EPISODIC)
 
 
+def setup_cotta(model, adaptation_mode, tokenizer, config=None):
+    """CoTTA for text, using token masking for the augmentation teacher."""
+    model = adapt_utils.configure_model(model, adaptation_mode)
+    config = config or {}
+    if config.get('complete_optimizer', False):
+        # Include every parameter enabled by configure_model; the legacy
+        # collector recognizes only a subset of attention bias names.
+        params = [p for p in model.parameters() if p.requires_grad]
+    else:
+        params, _ = adapt_utils.collect_params(model, adaptation_mode)
+    params = list({id(p): p for p in params}.values())
+    optimizer = setup_optimizer(params)
+    if 'lr' in config:
+        for group in optimizer.param_groups:
+            group['lr'] = config['lr']
+    return CoTTA(
+        model, optimizer, TokenMaskTransform(tokenizer.mask_token_id, probability=config.get('mask_probability', 0.10)),
+        steps=cfg.OPTIM.STEPS, episodic=cfg.MODEL.EPISODIC,
+        mt_alpha=config.get('mt_alpha', 0.999), rst_m=config.get('rst_m', 0.01),
+        ap=config.get('ap', 0.92), n_augmentations=config.get('n_augmentations', 32),
+        symmetric_loss=config.get('symmetric_loss', False),
+        record_diagnostics=config.get('record_diagnostics', False),
+    )
+
+
 def setup_eata(model, adaptation_mode, e_margin, d_margin):
     model = adapt_utils.configure_model(model, adaptation_mode)
     params, param_names = adapt_utils.collect_params(model, adaptation_mode)
@@ -649,8 +677,12 @@ def evaluate_tta_method(tta_model, dataloader, device, description="TTA",
             probs = torch.softmax(outputs, dim=1)
             all_logits.append(outputs.detach().cpu())  # Store on CPU
         except Exception as e:
-            print(f"Error in batch: {e}")
-            continue
+            # Never publish an apparently complete result after silently
+            # dropping failed examples.  The worker can resume the setting
+            # after the underlying problem is fixed.
+            raise RuntimeError(
+                f"{description} failed at completed batch {num_batches}"
+            ) from e
         
         _, preds = torch.max(outputs, dim=1)
         all_preds.extend(preds.cpu().tolist())
@@ -812,7 +844,7 @@ def parse_args():
                         help='Random seed for model adaptation and data loading')
     
     parser.add_argument('--methods', type=str, nargs='+',
-                       default=['baseline', 'tent', 'eata', 'sar', 'prototta'],
+                       default=['baseline', 'tent', 'eata', 'sar', 'cotta', 'prototta'],
                        help='Methods to evaluate (additive - only adds missing)')
     parser.add_argument('--corruption_types', type=str, nargs='+', default=None)
     parser.add_argument('--severities', type=int, nargs='+', default=None)
@@ -955,7 +987,17 @@ def main():
                                 'lambda_ema_momentum': args.proto_lambda_ema_momentum,
                                 'lambda_min': args.proto_lambda_min,
                                 'lambda_max': args.proto_lambda_max},
-                    'sar': {'learning_rate': args.learning_rate, 'adaptation_mode': args.adaptation_mode}
+                    'sar': {'learning_rate': args.learning_rate, 'adaptation_mode': args.adaptation_mode},
+                    'cotta': {
+                        'learning_rate': args.learning_rate,
+                        'adaptation_mode': args.adaptation_mode,
+                        'mt_alpha': 0.999,
+                        'rst_m': 0.01,
+                        'ap': 0.92,
+                        'n_augmentations': 32,
+                        'augmentation': 'token_mask_0.10',
+                        'episodic': False,
+                    }
                 }
             },
             'results': {},
@@ -1108,7 +1150,7 @@ def main():
                     result.update(config_metrics_evaluator.compute_gt_class_contribution(adapted_activations, labels_tensor))
 
                 
-            elif method in ['tent', 'eata', 'prototta', 'sar']:
+            elif method in ['tent', 'eata', 'prototta', 'sar', 'cotta']:
                 if method == 'tent':
                     tta_model = setup_tent(model, args.adaptation_mode)
                 elif method == 'eata':
@@ -1130,6 +1172,8 @@ def main():
                                               adaptive_lambda_strategy=args.proto_adaptive_strategy)
                 elif method == 'sar':
                     tta_model = setup_sar(model, args.adaptation_mode)
+                elif method == 'cotta':
+                    tta_model = setup_cotta(model, args.adaptation_mode, tokenizer)
                 
                 result = evaluate_tta_method(
                     tta_model, dataloader, device, method,

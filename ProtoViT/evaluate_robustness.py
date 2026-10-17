@@ -41,6 +41,9 @@ from prototype_tta_metrics import PrototypeMetricsEvaluator
 from enhanced_prototype_metrics import EnhancedPrototypeMetrics
 from efficiency_metrics import EfficiencyTracker, compare_efficiency_metrics
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from tta_baselines import CoTTA, CoTTAImageTransform
+
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -97,6 +100,45 @@ def setup_tent(model):
     params, param_names = tent.collect_params(model)
     optimizer = setup_optimizer(params)
     return tent.Tent(model, optimizer, steps=cfg.OPTIM.STEPS, episodic=cfg.MODEL.EPISODIC)
+
+
+def setup_cotta(model, config=None):
+    """Set up CoTTA with the configured transformer parameter subset."""
+    config = config or {}
+    adaptation_mode = config.get('adaptation_mode', 'layernorm_attn_bias')
+    if adaptation_mode == 'reference_weights':
+        # Match the reference collector: module-local weights and biases.
+        # Prototype vectors and patch-selection tensors are not weight/bias.
+        model.train()
+        model.requires_grad_(False)
+        params = []
+        for module in model.modules():
+            for name, parameter in module.named_parameters(recurse=False):
+                if name in ('weight', 'bias'):
+                    parameter.requires_grad_(True)
+                    params.append(parameter)
+            if isinstance(module, torch.nn.BatchNorm2d):
+                module.track_running_stats = False
+                module.running_mean = None
+                module.running_var = None
+    else:
+        model = proto_entropy.configure_model(model, adaptation_mode=adaptation_mode)
+        params, _ = proto_entropy.collect_params(model, adaptation_mode=adaptation_mode)
+    # Some collectors traverse attention modules recursively; avoid duplicates.
+    params = list({id(parameter): parameter for parameter in params}.values())
+    if 'model_mode' in config:
+        if config['model_mode'] not in ('train', 'eval'):
+            raise ValueError('CoTTA model_mode must be train or eval')
+        model.train(config['model_mode'] == 'train')
+    optimizer = setup_optimizer(params, lr=config.get('lr'))
+    return CoTTA(
+        model, optimizer, CoTTAImageTransform(mean, std, image_size=img_size),
+        steps=config.get('steps', cfg.OPTIM.STEPS), episodic=cfg.MODEL.EPISODIC,
+        mt_alpha=config.get('mt_alpha', 0.999), rst_m=config.get('rst_m', 0.001),
+        ap=config.get('ap', 0.1), n_augmentations=config.get('n_augmentations', 32),
+        teacher_train=config.get('teacher_train', False),
+        record_diagnostics=config.get('record_diagnostics', False),
+    )
 
 
 def setup_proto_entropy(model, use_importance=False, use_confidence=False,
@@ -281,10 +323,17 @@ def evaluate_model(model, loader, description="Inference", verbose=True,
     # hook records the exact backbone output that produced the returned logits,
     # so online TTA is never replayed from its final checkpoint.
     model.eval()
-    actual_model = model.model if hasattr(model, 'model') else model
+    actual_model = (
+        model.metric_model if hasattr(model, 'metric_model')
+        else model.model if hasattr(model, 'model') else model
+    )
     raw_outputs = []
     hook = None
-    if compute_proto_metrics and proto_evaluator is not None:
+    # CoTTA exposes the exact teacher output used for its prediction.  Avoid a
+    # hook in that case: augmentation ensembling performs many teacher forwards
+    # and retaining every raw output needlessly increases GPU memory.
+    if (compute_proto_metrics and proto_evaluator is not None
+            and not hasattr(model, 'last_metric_output')):
         hook = actual_model.register_forward_hook(
             lambda _module, _inputs, output: raw_outputs.append(output)
         )
@@ -313,7 +362,11 @@ def evaluate_model(model, loader, description="Inference", verbose=True,
             n_examples += batch_size
 
             if compute_proto_metrics and proto_evaluator is not None:
-                raw = _find_matching_raw_output(raw_outputs, logits)
+                raw = getattr(model, 'last_metric_output', None)
+                if raw is None:
+                    raw = _find_matching_raw_output(raw_outputs, logits)
+                elif _output_logits(raw).data_ptr() != logits.data_ptr():
+                    raise RuntimeError('CoTTA metric output does not match returned logits')
                 activations = _protovit_activations(raw)
                 all_activations.append(activations.detach().cpu())
                 all_logits.append(logits.detach().cpu())
@@ -500,6 +553,8 @@ def evaluate_single_combination(model_path, corruption_type, severity, data_dir,
             eval_model = base_model
         elif mode_name == 'tent':
             eval_model = setup_tent(base_model)
+        elif mode_name == 'cotta':
+            eval_model = setup_cotta(base_model, mode_config)
         elif mode_name.startswith('proto_imp_conf'):
             # ProtoEntropy with canonical or explicitly ablated weighting.
             eval_model = setup_proto_entropy(
@@ -689,6 +744,17 @@ def main():
     parser.add_argument('--batch_size', type=int, default=None,
                        help=f'Batch size for evaluation (default: {test_batch_size} from settings)')
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--cotta-lr', type=float, default=None)
+    parser.add_argument('--cotta-momentum', type=float, default=0.999)
+    parser.add_argument('--cotta-restore', type=float, default=0.001)
+    parser.add_argument('--cotta-threshold', type=float, default=0.1)
+    parser.add_argument('--cotta-augmentations', type=int, default=32)
+    parser.add_argument('--cotta-steps', type=int, default=1)
+    parser.add_argument('--cotta-parameters', default='layernorm_attn_bias',
+                        choices=['layernorm_attn_bias', 'reference_weights', 'all_parameters'])
+    parser.add_argument('--cotta-teacher-train', action='store_true')
+    parser.add_argument('--cotta-student-mode', choices=['train', 'eval'], default='eval')
+    parser.add_argument('--cotta-diagnostics', action='store_true')
     
     # Output
     parser.add_argument('--output', type=str, default='./robustness_results_sev5.json',
@@ -714,7 +780,7 @@ def main():
     parser.add_argument('--use-enhanced-metrics', action='store_true', default=False,
                        help='Use enhanced prototype metrics (PCA-Weighted, Calibration, GT Class Contribution).')
     parser.add_argument('--modes', nargs='+', default=None,
-                       help='Subset of modes to run. Choices: normal tent loss eata sar '
+                       help='Subset of modes to run. Choices: normal tent loss eata sar cotta '
                             'proto_imp_conf_v1 proto_imp_conf_v2 proto_imp_conf_v3. '
                             'Default: all modes.')
     parser.add_argument('--corruptions', nargs='+', default=['all'],
@@ -836,6 +902,19 @@ def main():
     modes = {
         'normal': {},
         'tent': {},
+        'cotta': {
+            'lr': cfg.OPTIM.LR if args.cotta_lr is None else args.cotta_lr,
+            'steps': args.cotta_steps,
+            'adaptation_mode': args.cotta_parameters,
+            'mt_alpha': args.cotta_momentum,
+            'rst_m': args.cotta_restore,
+            'ap': args.cotta_threshold,
+            'n_augmentations': args.cotta_augmentations,
+            'teacher_train': args.cotta_teacher_train,
+            'model_mode': args.cotta_student_mode,
+            'record_diagnostics': args.cotta_diagnostics,
+            'episodic': False,
+        },
         'proto_imp_conf_v1': {  # Full config
             'use_geometric_filter': True,
             'geo_filter_threshold': 0.92,

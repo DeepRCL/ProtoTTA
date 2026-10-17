@@ -30,6 +30,10 @@ from proto_tta import compute_fishers, setup_eata, setup_proto_tta, setup_tent
 from prototype_tta_metrics import PrototypeMetricsEvaluator
 from sar_adapt import setup_sar
 
+sys.path.insert(0, str(ROOT.parent))
+from tta_baselines import CoTTA, CoTTAImageTransform
+import proto_tta as proto_tta_module
+
 _efficiency_spec = importlib.util.spec_from_file_location(
     "protovit_efficiency_metrics",
     ROOT.parent / 'ProtoViT' / 'efficiency_metrics.py'
@@ -201,10 +205,16 @@ def evaluate_model(model, loader, device, description='Eval', verbose=True,
 
     n_correct = 0
     n_total = 0
-    actual_model = model.model if hasattr(model, 'model') else model
+    actual_model = (
+        model.metric_model if hasattr(model, 'metric_model')
+        else model.model if hasattr(model, 'model') else model
+    )
     raw_outputs = []
     hook = None
-    if compute_proto_metrics and proto_evaluator is not None:
+    # CoTTA stores the prediction-matched EMA output itself.  Hooking its EMA
+    # model would retain every augmentation output and inflate GPU memory.
+    if (compute_proto_metrics and proto_evaluator is not None
+            and not hasattr(model, 'last_metric_output')):
         hook = actual_model.register_forward_hook(
             lambda _module, _inputs, output: raw_outputs.append(output)
         )
@@ -225,7 +235,11 @@ def evaluate_model(model, loader, device, description='Eval', verbose=True,
             n_correct += preds.eq(labels).sum().item()
             n_total += batch_size
             if compute_proto_metrics and proto_evaluator is not None:
-                raw = _find_matching_raw_output(raw_outputs, logits)
+                raw = getattr(model, 'last_metric_output', None)
+                if raw is None:
+                    raw = _find_matching_raw_output(raw_outputs, logits)
+                elif _output_logits(raw).data_ptr() != logits.data_ptr():
+                    raise RuntimeError('CoTTA metric output does not match returned logits')
                 activations = proto_evaluator._extract_prototype_activations(model, raw)
                 all_activations.append(activations.detach().cpu())
                 all_logits.append(logits.detach().cpu())
@@ -275,6 +289,45 @@ def setup_method(model, mode_name, mode_config, device, model_path, loader, fish
         return setup_tent(
             model, lr=mode_config.get('lr', 1e-3), steps=mode_config.get('steps', 1),
             model_mode=mode_config.get('model_mode', 'train'),
+        )
+    if mode_name == 'cotta':
+        adaptation_mode = mode_config.get('adaptation_mode', 'layernorm_attn_bias')
+        if adaptation_mode == 'reference_weights':
+            configured = model.train(mode_config.get('model_mode', 'train') == 'train')
+            configured.requires_grad_(False)
+            params = []
+            for module in configured.modules():
+                for name, parameter in module.named_parameters(recurse=False):
+                    if name in ('weight', 'bias'):
+                        parameter.requires_grad_(True)
+                        params.append(parameter)
+                if isinstance(module, torch.nn.BatchNorm2d):
+                    module.track_running_stats = False
+                    module.running_mean = None
+                    module.running_var = None
+        else:
+            if adaptation_mode != 'layernorm_attn_bias':
+                raise ValueError(f'Unsupported CoTTA adaptation mode: {adaptation_mode}')
+            configured = proto_tta_module.configure_model(
+                model, adaptation_mode=adaptation_mode,
+                model_mode=mode_config.get('model_mode', 'train'),
+            )
+            params, _ = proto_tta_module.collect_params(configured, adaptation_mode)
+        params = list({id(p): p for p in params}.values())
+        if mode_config.get('optimizer', 'Adam') == 'SGD':
+            optimizer = torch.optim.SGD(params, lr=mode_config.get('lr', .01),
+                                        momentum=.9, dampening=0., weight_decay=0.,
+                                        nesterov=True)
+        else:
+            optimizer = torch.optim.Adam(params, lr=mode_config.get('lr', 1e-3))
+        return CoTTA(
+            configured, optimizer,
+            CoTTAImageTransform(IMAGENET_MEAN, IMAGENET_STD, image_size=IMG_SIZE),
+            steps=mode_config.get('steps', 1), mt_alpha=mode_config.get('mt_alpha', 0.999),
+            rst_m=mode_config.get('rst_m', 0.001), ap=mode_config.get('ap', 0.1),
+            n_augmentations=mode_config.get('n_augmentations', 32),
+            teacher_train=mode_config.get('teacher_train', False),
+            record_diagnostics=mode_config.get('record_diagnostics', False),
         )
     if mode_name == 'eata':
         current_fishers = fishers
@@ -471,6 +524,9 @@ def build_run_config(args, selected_modes, corruptions, clean_dir):
         'on_the_fly': args.on_the_fly,
         'batch_size': args.batch_size,
         'seed': args.seed,
+        'cotta_momentum': args.cotta_momentum,
+        'cotta_reference_imagenet': args.cotta_reference_imagenet,
+        'cotta_transformer_reference': args.cotta_transformer_reference,
         'adapt_model_mode': args.adapt_model_mode,
         'num_workers': args.num_workers,
         'severity': args.severity,
@@ -581,11 +637,16 @@ def main():
     parser.add_argument('--use-enhanced-metrics', action='store_true', default=False,
                         help='Use enhanced prototype metrics (PCA-Weighted, Calibration, GT Class Contribution).')
     parser.add_argument('--modes', nargs='+', default=[
-        'normal', 'tent', 'eata', 'sar',
+        'normal', 'tent', 'eata', 'sar', 'cotta',
         'proto_tta', 'proto_tta_plus_7030', 'proto_tta_plus_7525', 'proto_tta_plus_8020',
     ])
     parser.add_argument('--corruptions', nargs='+', default=['all'], help='"all" or specific corruption names')
     parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--cotta-momentum', type=float, default=0.999)
+    parser.add_argument('--cotta-reference-imagenet', action='store_true',
+                        help='Authors ImageNet CoTTA optimizer, parameter set and teacher settings; use batch 64')
+    parser.add_argument('--cotta-transformer-reference', action='store_true',
+                        help='ViT/Swin benchmark CoTTA settings; retain requested batch size and reset protocol')
     parser.add_argument('--steps', type=int, default=1)
     parser.add_argument(
         '--sar-lr', type=float, default=1e-4,
@@ -721,6 +782,26 @@ def main():
             'steps': args.memo_steps,
         },
         'tent': {'lr': args.lr, 'steps': args.steps, 'model_mode': args.adapt_model_mode},
+        'cotta': {
+            'lr': args.lr, 'steps': args.steps,
+            'model_mode': args.adapt_model_mode,
+            'adaptation_mode': 'layernorm_attn_bias',
+            'mt_alpha': args.cotta_momentum,
+            'rst_m': 0.001,
+            'ap': 0.1,
+            'n_augmentations': 32,
+            'episodic': False,
+            **(dict(lr=.01, steps=1, optimizer='SGD',
+                    adaptation_mode='reference_weights', model_mode='train',
+                    teacher_train=True, mt_alpha=.999, rst_m=.001,
+                    ap=.1, n_augmentations=32)
+               if args.cotta_reference_imagenet else {}),
+            **(dict(lr=.01, steps=1, optimizer='SGD',
+                    adaptation_mode='reference_weights', model_mode='eval',
+                    teacher_train=False, mt_alpha=.999, rst_m=.001,
+                    ap=.1, n_augmentations=32)
+               if args.cotta_transformer_reference else {}),
+        },
         'eata': {'lr': args.lr, 'steps': args.steps, 'model_mode': args.adapt_model_mode},
         'sar': {
             'lr': args.sar_lr,
