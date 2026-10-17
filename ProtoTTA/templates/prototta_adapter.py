@@ -51,6 +51,9 @@ def add_prototta(model, prototype_class_identity):
             aggregation="topk_mean",
             aggregation_topk=1,
             geometric_threshold=0.3,
-            output_entropy_weight=0.0,
+            # Full paper method. For the scalar ablation, use
+            # interpolation_mode="fixed" and set fixed_lambda in [0, 1].
+            interpolation_mode="adaptive",
+            gradient_normalize=True,
         ),
     )

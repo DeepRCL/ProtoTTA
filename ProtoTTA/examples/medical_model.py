@@ -47,7 +47,7 @@ def build_adapted_model(model: MedicalPrototypeModel) -> ProtoTTAAdapter:
         model,
         adapt_layer_norm=False,
         adapt_batch_norm=True,
-        extra_parameter_patterns=("prototype_vectors",),
+        use_batch_statistics=True,
     )
     print("Adapting:", ", ".join(names))
     optimizer = torch.optim.Adam(parameters, lr=1e-4)
@@ -58,7 +58,9 @@ def build_adapted_model(model: MedicalPrototypeModel) -> ProtoTTAAdapter:
         config=ProtoTTAConfig(
             score_mapping="cosine",
             geometric_threshold=0.3,
-            output_entropy_weight=0.0,
+            use_confidence_weighting=False,
+            interpolation_mode="adaptive",
+            gradient_normalize=True,
         ),
     )
 

@@ -86,15 +86,18 @@ adapted = ProtoTTAAdapter(
 ```
 
 Positive weights select supporting prototypes. Their absolute values also act
-as importance weights. If a predicted class has no positive weights, the
-adapter selects the largest-magnitude prototype as a safe fallback.
+as importance weights for controller routing. The prototype objective itself
+uses all shared prototypes with classifier-derived soft targets, as in the
+paper. If a class has no positive weights, the controller falls back to the
+prototypes with the largest classifier weights.
 
 ### Custom routing
 
 For hierarchical, multi-label, or dynamically routed prototypes, return
 `target_mask` with shape `[B, P]` from the extractor. Each row must select at
 least one prototype. You may also return `importance_weights` with shape
-`[B, P]`.
+`[B, P]`. Adaptive mode also requires `class_evidence` with shape `[B, C]`
+when neither an identity nor classifier weights are supplied.
 
 ## 4. Map Native Scores to Probabilities
 
@@ -146,6 +149,7 @@ blocks only when needed:
 ```python
 parameters, names = configure_model(
     model,
+    use_batch_statistics=False,
     extra_parameter_patterns=(
         "*add_on_layers*",
         "*prototype_projection*",
@@ -160,7 +164,9 @@ is selected.
 Recommended starting scopes:
 
 - **Medical CNN / ProtoPNet:** BatchNorm affine parameters and the small add-on
-  `1x1` convolution block. Keep running statistics frozen.
+  `1x1` convolution block. The paper uses current-batch BatchNorm statistics
+  without accumulating running buffers, enabled with
+  `use_batch_statistics=True`.
 - **Vision Transformer:** LayerNorm affine parameters, then optionally attention
   projection biases.
 - **Shared-prototype text model:** LayerNorm affine parameters; keep the
@@ -182,31 +188,93 @@ config = ProtoTTAConfig(
 ```
 
 The default filter accepts a sample when its maximum mapped filter probability
-exceeds the threshold. If the model has a better geometric signal, return it as
-`filter_scores` or implement it in the extractor.
+exceeds the threshold. If the model has a different rule, compute it in the
+extractor and return `reliability_mask` with shape `[B]`. This is the preferred
+route for compound criteria such as the paper's ProtoPNet geometry-plus-output
+entropy filter.
 
 Track:
 
 ```python
 adapted.stats
-# seen_samples, adapted_samples, optimizer_steps, last_loss
+# acceptance counts, loss, lambda/controller diagnostics, gradient norms
 ```
 
 A zero accepted-sample rate usually means the score mapping is wrong or the
 threshold is in the wrong scale. Verify both before disabling the filter.
 
-## 8. Pure and Hybrid Objectives
+## 8. Choose Fixed or Adaptive Interpolation
 
-`output_entropy_weight` is the fraction assigned to ordinary output entropy:
+The submitted paper reports both modes. `lambda` is always the prototype-loss
+fraction.
+
+### Full adaptive ProtoTTA
 
 ```python
-ProtoTTAConfig(output_entropy_weight=0.0)  # prototype objective only
-ProtoTTAConfig(output_entropy_weight=0.2)  # 80% prototype + 20% output
-ProtoTTAConfig(output_entropy_weight=1.0)  # output entropy only
+ProtoTTAConfig(
+    interpolation_mode="adaptive",
+    gradient_normalize=True,
+    controller_topk=3,
+    controller_delta0=0.25,
+    controller_min_consistency=0.25,
+    use_coverage_guard=True,
+)
 ```
 
-Start with the prototype-only objective. Treat the hybrid weight as a model
-choice that must be reported, not a value selected using target labels.
+For every reliable sample, the adapter computes:
+
+1. `lambda_activation` from the top-three target-prototype distances to `0.5`;
+2. `lambda_relative` from predicted-class prototype separation relative to
+   output-probability separation;
+3. half-batch gradient-consistency scores for prototype and output losses;
+4. the paper's batch-level consistency gate and low-coverage/high-output-margin
+   guard;
+5. a sample-wise `lambda_i` and gradient-normalized unified loss.
+
+All controller values, routing decisions, lambdas, and gradient norms are
+detached before the final backward pass.
+
+For models whose controller representation differs from the prototype-loss
+representation, the extractor may return `controller_activations` `[B, P]`.
+Multi-branch models may also return precomputed `class_evidence` `[B, C]` and
+`activation_lambda` `[B]`; these override only the corresponding controller
+calculation while retaining the unified objective and router.
+
+### Fixed ProtoTTA
+
+```python
+ProtoTTAConfig(
+    interpolation_mode="fixed",
+    fixed_lambda=1.0,  # pure prototype entropy
+    gradient_normalize=True,
+)
+
+ProtoTTAConfig(
+    interpolation_mode="fixed",
+    fixed_lambda=0.7,  # 70% prototype + 30% output entropy
+    gradient_normalize=True,
+)
+```
+
+Never select `fixed_lambda` using target labels. Treat it as a declared
+ablation/configuration, or use adaptive mode for the full submitted method.
+
+### Paper-backbone reference
+
+The reusable adapter supports the equations shared by both variants. Exact
+reproduction also requires each backbone's native activation and reliable-set
+rule:
+
+| Backbone | Prototype/controller setup | Reliable-set and adaptation notes |
+|---|---|---|
+| ProtoViT | Top-2 mean sub-prototypes, affine cosine mapping, identity plus classifier weights | Raw aggregated cosine `> 0.92`; confidence on; LayerNorm affine and attention biases |
+| ProtoPFormer | Custom local/global mapping and equal branch loss; provide combined `class_evidence` and `activation_lambda` | Mean of local/global native maxima `> 0.55`; confidence on; LayerNorm affine and attention biases |
+| ProtoPNet | `score_mapping="distance"`; identity routing; set `gradient_epsilon=1e-8`, `controller_output_floor=0` | Native response `> 0.8` and output entropy `< 0.4*log(5)`; confidence off; current-batch BatchNorm plus add-on convolutions |
+| ProtoLens | Shared `classifier_weights`; `score_mapping="similarity"`, `score_temperature=5` | Raw Top-25 cosine mean `>= 0.1`; confidence off; LayerNorm affine and attention-projection biases |
+
+Compute the exact condition as `reliability_mask` when its scale differs from
+the prototype-loss mapping. The paper-specific directories are the executable
+reference for details such as ProtoPFormer training mode and optimizer values.
 
 ## 9. Choose the Reset Protocol
 
@@ -261,9 +329,10 @@ For the target model:
 
 ### BatchNorm results are unstable
 
-`configure_model` leaves BatchNorm in evaluation mode and updates only affine
-parameters. Do not call `model.train()` afterward unless changing running
-statistics is an intentional part of the protocol.
+By default, `configure_model` leaves BatchNorm in evaluation mode and updates
+only affine parameters. With `use_batch_statistics=True`, it uses current-batch
+statistics without updating running buffers. Do not call `model.train()` or
+`model.eval()` afterward because either can silently change the chosen protocol.
 
 ## 12. Handoff Checklist for Another Agent
 

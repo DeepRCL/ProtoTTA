@@ -42,6 +42,7 @@ parameters, names = configure_model(
     model,
     adapt_layer_norm=True,
     adapt_batch_norm=True,
+    use_batch_statistics=False,
     # Optional architecture-specific additions:
     extra_parameter_patterns=("*add_on_layers*",),
 )
@@ -49,12 +50,15 @@ optimizer = torch.optim.Adam(parameters, lr=1e-4)
 print("Adapting:", names)
 ```
 
-All other parameters are frozen. BatchNorm running statistics remain frozen.
+All other parameters are frozen. BatchNorm running statistics remain frozen by
+default. ProtoPNet-style models can set `use_batch_statistics=True` to use the
+current batch without accumulating running statistics, matching the paper.
 
 ### 2. Wrap the model
 
 For class-specific prototypes, provide an identity matrix of shape
-`[prototypes, classes]`:
+`[prototypes, classes]`. If available, also pass the frozen classifier matrix
+to reproduce classifier-importance weighting:
 
 ```python
 from ProtoTTA import ProtoTTAAdapter, ProtoTTAConfig
@@ -63,17 +67,21 @@ adapted_model = ProtoTTAAdapter(
     model,
     optimizer,
     prototype_class_identity=model.prototype_class_identity,
+    classifier_weights=model.classifier.weight.detach(),  # optional [C, P]
     config=ProtoTTAConfig(
         score_mapping="cosine",
         geometric_threshold=0.3,
-        output_entropy_weight=0.0,
+        interpolation_mode="adaptive",
+        gradient_normalize=True,
     ),
 )
 ```
 
-For shared prototypes, pass the frozen classifier matrix with shape
-`[classes, prototypes]` as `classifier_weights`. For tuple/custom model
-outputs, pass an `output_extractor` callback.
+For shared prototypes, omit `prototype_class_identity` and pass the frozen
+classifier matrix with shape `[classes, prototypes]` as `classifier_weights`.
+This automatically enables the paper's all-prototype, classifier-derived soft
+target BCE objective. For tuple/custom model outputs, pass an
+`output_extractor` callback.
 
 ### 3. Run online adaptation
 
@@ -140,13 +148,40 @@ For each unlabeled test batch, ProtoTTA:
 1. obtains the model pseudo-label and prototype evidence;
 2. selects prototypes associated with the pseudo-label;
 3. rejects samples without sufficient prototype support;
-4. minimizes binary entropy over the selected prototype probabilities;
-5. optionally weights prototypes by classifier importance and samples by
-   prediction confidence;
-6. updates only the parameters selected by `configure_model`.
+4. computes prototype entropy (or the shared-prototype soft-target loss) and
+   output entropy;
+5. weights them by prototype importance and, where configured, prediction
+   confidence;
+6. interpolates their gradient-normalized contributions with a fixed scalar or
+   the adaptive per-sample controller;
+7. updates only the parameters selected by `configure_model`.
 
-`output_entropy_weight=0` uses the prototype objective alone. A value in
-`(0, 1]` blends prototype entropy with ordinary output entropy.
+The submitted method uses `interpolation_mode="adaptive"`. It computes a
+sample-wise prototype coefficient from activation margin and relative class
+evidence, routes between them using half-batch gradient consistency and a
+coverage guard, and normalizes both loss components by their detached gradient
+norms.
+
+The fixed-scalar ablation is also supported:
+
+```python
+ProtoTTAConfig(
+    interpolation_mode="fixed",
+    fixed_lambda=0.7,       # 70% prototype, 30% output entropy
+    gradient_normalize=True,
+)
+```
+
+`fixed_lambda` follows the paper: `1` is pure prototype entropy and `0` is
+pure output entropy.
+
+The reusable defaults are intentionally architecture-neutral. Exact
+paper-reproduction settings differ by backbone, including activation mapping,
+filtering, confidence weighting, aggregation, and adaptation scope. Use
+`reliability_mask`, `controller_activations`, `class_evidence`, or
+`activation_lambda` in a custom output extractor when a backbone's rule cannot
+be represented by the generic settings. The existing backbone directories
+remain the reference implementations for the reported experiments.
 
 ## Paper Implementations
 

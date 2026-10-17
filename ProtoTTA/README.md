@@ -43,6 +43,16 @@ The adapter also needs one prototype-routing mechanism:
 - `classifier_weights` with shape `[C, P]` for shared prototypes; or
 - a per-batch `target_mask` with shape `[B, P]` in the model output.
 
+Adaptive mode additionally needs class-level prototype evidence. It derives
+this automatically from `prototype_class_identity` or `classifier_weights`;
+otherwise, return `class_evidence` with shape `[B, C]`. Fixed mode does not
+need class-level evidence.
+
+For shared prototypes, omit the identity and pass `classifier_weights`. The
+adapter then uses all prototypes with the paper's classifier-derived soft
+targets and importance-weighted BCE, rather than treating them as
+class-specific prototypes.
+
 ## Minimal Integration
 
 ```python
@@ -55,6 +65,7 @@ parameters, parameter_names = configure_model(
     model,
     adapt_layer_norm=True,
     adapt_batch_norm=True,
+    use_batch_statistics=False,
     extra_parameter_patterns=("*add_on_layers*",),
 )
 optimizer = torch.optim.Adam(parameters, lr=1e-4)
@@ -71,7 +82,8 @@ model = ProtoTTAAdapter(
         geometric_threshold=0.3,
         use_importance_weighting=True,
         use_confidence_weighting=True,
-        output_entropy_weight=0.0,
+        interpolation_mode="adaptive",
+        gradient_normalize=True,
     ),
 )
 
@@ -110,6 +122,21 @@ adapted_model = ProtoTTAAdapter(
 If a model uses a special score transform, pass `score_mapper`. It must map a
 score tensor to probabilities in `[0, 1]` without detaching gradients.
 
+The optional output fields cover paper-specific or multi-branch behavior:
+
+| Field | Shape | Purpose |
+|---|---:|---|
+| `target_mask` | `[B, P]` | Per-sample prototype selection |
+| `importance_weights` | `[B, P]` | Per-prototype loss weights |
+| `prototype_targets` | `[B, P]` | Custom soft targets for weighted BCE |
+| `reliability_mask` | `[B]` | Exact architecture-specific reliable set |
+| `controller_activations` | `[B, P]` | Mapped activations used only by the controller |
+| `class_evidence` | `[B, C]` | Precomputed class evidence for relative routing |
+| `activation_lambda` | `[B]` | Precomputed multi-branch activation-margin coefficient |
+
+These overrides are useful for reproducing ProtoPFormer's two-branch rule or a
+filter that combines prototype geometry with output entropy.
+
 ## Safe Starting Settings
 
 For a first port:
@@ -126,7 +153,20 @@ ProtoTTAConfig(
     use_confidence_weighting=True,
     use_importance_weighting=True,
     adapt_all_prototypes=False,
-    output_entropy_weight=0.0,
+    interpolation_mode="adaptive",
+    gradient_normalize=True,
+    controller_topk=3,
+    controller_delta0=0.25,
+)
+```
+
+This is the full submitted method. For the fixed scalar variant use:
+
+```python
+ProtoTTAConfig(
+    interpolation_mode="fixed",
+    fixed_lambda=0.7,  # paper convention: prototype fraction
+    gradient_normalize=True,
 )
 ```
 
@@ -139,6 +179,12 @@ ratio = model.stats["adapted_samples"] / max(model.stats["seen_samples"], 1)
 
 If the ratio is near zero, verify the score mapping before lowering the
 geometric threshold.
+
+The generic filter compares the maximum mapped `filter_scores` value with
+`geometric_threshold`. The submitted experiments use different
+backbone-specific reliable sets. For exact reproduction, return the final
+boolean `reliability_mask` from the extractor or use the backbone-specific
+implementation already in this repository.
 
 ## Validate an Integration
 
