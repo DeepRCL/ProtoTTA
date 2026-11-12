@@ -573,7 +573,8 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
                 'teacher_median', 'teacher_batch_median',
                 'coverage_router', 'absolute_consistency_router',
                 'ratio_only_router', 'absolute_only_router',
-                'forced_relative', 'forced_native', 'fixed_lambda_0.2'}:
+                'forced_relative', 'forced_native', 'fixed_lambda_0.2',
+                'mean_act_rel'}:
             raise ValueError(
                 'adaptive_controller must be absolute_distance or '
                 'relative_margin, teacher_median, teacher_batch_median, '
@@ -857,7 +858,7 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
         elif routing_mode == 'forced_native':
             consistency_native = False
             use_native = True
-        elif routing_mode in {'forced_relative', 'fixed_lambda_0.2'}:
+        elif routing_mode in {'forced_relative', 'fixed_lambda_0.2', 'mean_act_rel'}:
             consistency_native = False
             use_native = False
         else:
@@ -865,6 +866,9 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
 
         if routing_mode == 'fixed_lambda_0.2':
             selected_lambdas = torch.full_like(relative_lambdas, 0.2)
+        elif routing_mode == 'mean_act_rel':
+            # Simplest label-free combination: sample-wise average of both estimates.
+            selected_lambdas = 0.5 * (native_lambdas + relative_lambdas)
         else:
             selected_lambdas = (
                 native_lambdas if use_native else relative_lambdas
@@ -1155,7 +1159,8 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
         if self.adaptive_controller in {
                 'coverage_router', 'absolute_consistency_router',
                 'ratio_only_router', 'absolute_only_router',
-                'forced_relative', 'forced_native', 'fixed_lambda_0.2'}:
+                'forced_relative', 'forced_native', 'fixed_lambda_0.2',
+                'mean_act_rel'}:
             lambdas = self._routed_lambdas(
                 logits,
                 similarities,

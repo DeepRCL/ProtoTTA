@@ -1,351 +1,225 @@
-# Adding ProtoTTA to a New Model
+# Adding ProtoTTA to a New Prototype Model
 
-This guide explains how to add **ProtoTTA** or **ProtoTTA+** to a new prototype-based architecture.
+This guide describes how to connect a prototype model to
+[`ProtoTTAAdapter`](./adapter.py). Equation numbers refer to the paper.
 
-The goal is not to force every model into the same tensor layout. The goal is to expose a small set of **shared semantic hooks**:
+## 1. Identify the model semantics
 
-- logits,
-- prototype activations or similarities,
-- a rule for selecting target prototypes,
-- a rule for filtering unreliable test samples,
-- a set of parameters that are allowed to update at test time.
+| Question | Determines |
+|---|---|
+| Which tensor holds the class logits? | `logits`, shape `[B, C]` |
+| Which tensor holds the prototype responses? | `prototype_scores`, shape `[B, P]` or `[B, P, K]` |
+| Is the response a cosine similarity, another similarity, a distance, or a probability? | `score_mapping` or `score_mapper` |
+| Are prototypes class-specific or shared across classes? | routing (Section 3) |
+| Which normalization and structural parameters exist? | `configure_model` arguments |
+| What marks a new target domain? | when to call `reset()` |
 
-## 1. Minimum Model Contract
+## 2. Expose the output contract
 
-Your model should support these capabilities.
-
-### A. Forward pass must expose prototype evidence
-
-ProtoTTA needs access to per-sample prototype scores, not just final logits.
-
-Recommended output contract:
+Return a dictionary from `forward`:
 
 ```python
-{
-    "logits": logits,                     # [B, C]
-    "prototype_scores": prototype_scores, # [B, P] or [B, P, K]
-    "filter_scores": filter_scores,       # [B, P] optional, defaults to prototype_scores
-}
+def forward(self, inputs):
+    features = self.encoder(inputs)
+    prototype_scores = self.prototype_layer(features)
+    logits = self.classifier(prototype_scores)
+    return {
+        "logits": logits,
+        "prototype_scores": prototype_scores,
+        "filter_scores": prototype_scores,
+    }
 ```
 
-Equivalent tuple-based contracts are also fine, as long as the wrapper knows how to extract:
-
-- `logits`
-- `prototype_scores`
-- `filter_scores`
-
-### B. The model must expose how prototypes relate to classes
-
-There are two common cases.
-
-#### Class-specific prototypes
-
-Used in ProtoViT, ProtoPNet, and ProtoPFormer.
-
-Recommended hook:
+or keep `forward` unchanged and pass an extractor:
 
 ```python
-model.prototype_class_identity  # [P, C]
+from ProtoTTA import PrototypeBatch
+
+def extract_output(output):
+    logits, min_distances, similarities = output
+    return PrototypeBatch(logits=logits, prototype_scores=similarities)
 ```
 
-In this case, target prototypes for sample `i` are the prototypes belonging to pseudo-label `argmax(logits[i])`.
+The extractor must not detach the tensors or run the model under
+`torch.no_grad()`. Optional `PrototypeBatch` fields:
 
-#### Shared prototypes
+| Field | Shape | Purpose |
+|---|---:|---|
+| `filter_scores` | `[B, P]` or `[B, P, K]` | Native responses for the geometric filter (default: `prototype_scores`) |
+| `target_mask` | `[B, P]` | Per-sample pseudo-label prototypes |
+| `importance_weights` | `[B, P]` | Per-prototype loss weights before normalization |
+| `prototype_targets` | `[B, P]` | Soft targets for the importance-weighted BCE |
+| `reliability_mask` | `[B]` | Reliability indicator `m_i` computed by the model |
+| `controller_activations` | `[B, P]` | Mapped activations used only by the controller |
+| `class_evidence` | `[B, C]` | Class evidence `S_ic` for the relative-evidence coefficient |
+| `activation_lambda` | `[B]` | Activation-margin coefficient computed by the model |
 
-Used in ProtoLens-style models, where a prototype may support multiple classes.
+## 3. Prototype routing
 
-Recommended hook:
+**Class-specific prototypes.** Pass `prototype_class_identity` with shape
+`[P, C]`. The pseudo-label prototypes are those whose identity row has its
+maximum at `yhat_i`. To weight the binary entropies by the classifier head
+(Eq. 40), also pass the frozen `classifier_weights` with shape `[C, P]`;
+without them, or with `use_importance_weighting=False`, the loss is the
+uniform mean over the pseudo-label prototypes.
+
+**Shared prototypes.** Pass only `classifier_weights`. The prototype loss is
+then the importance-weighted binary cross-entropy over all `P` prototypes with
+importance `|W_yhat,p| / (max_r |W_yhat,r| + eps_W)` and soft target
+`sigmoid(2 W_yhat,p)` (Eqs. 22-23). The controller uses the prototypes with
+positive weight for the pseudo-label (Eq. 25) and, for each class, the
+positively weighted prototypes or the three largest weights (Eqs. 26-27).
+
+**Other layouts.** Return `target_mask` (each row non-empty) and, for
+adaptive mode, `class_evidence`.
+
+## 4. Map prototype responses to activations
+
+| `score_mapping` | Activation | Paper |
+|---|---|---|
+| `"cosine"` | `(clip(u, -1, 1) + 1) / 2` | Eq. 29 |
+| `"distance"` | `log((d + 1) / (d + 1e-4)) / 9` of the squared distance `d` | Eq. 33 |
+| `"similarity"` | `sigmoid(score_temperature * u)` | |
+| `"probability"` | `u` | |
+
+Any other transformation is passed as `score_mapper`, a differentiable,
+shape-preserving function of the aggregated native responses, for example
 
 ```python
-model.classifier.weight  # [C, P]
+score_mapper=lambda u: torch.sigmoid(5.0 * u.clamp(-1.0, 1.0))  # Eq. 35
 ```
 
-In this case, the target mask is derived from class-head weights for the pseudo-label.
+The prototype loss uses the activation clamped to `[eps_H, 1 - eps_H]`. The
+controller statistics use the detached activation clamped to `[eps, 1]`.
 
-### C. The model must allow a restricted set of test-time updates
+## 5. Aggregate sub-prototypes
 
-ProtoTTA is most stable when only a small part of the network adapts.
+Scores shaped `[B, P, K]` are reduced over `K` before mapping and filtering:
+`aggregation="topk_mean"` with `aggregation_topk` (default `2`, Eq. 28),
+`"max"`, or `"mean"`. Table 11 of the paper compares the three on ProtoViT.
 
-Typical choices:
+## 6. Select the adaptation parameters
 
-- `LayerNorm` or `BatchNorm` parameters,
-- attention biases in ViTs,
-- small prototype-side modules such as projection layers, depthwise convs, add-on layers, or prototype vectors,
-- optionally the classification head.
-
-## 2. Choose the Adaptation Scope
-
-Use the smallest scope that still lets the model recover under shift.
-
-### Vision Transformer-like models
-
-Recommended first choice:
-
-- LayerNorm weights and biases,
-- attention `qkv/proj` biases,
-- small prototype-side heads if they exist.
-
-### Convolutional prototype models
-
-Recommended first choice:
-
-- BatchNorm or LayerNorm parameters,
-- add-on `1x1` convolutions,
-- optionally prototype vectors,
-- optionally the final linear head.
-
-### Shared-prototype text models
-
-Recommended first choice:
-
-- LayerNorm parameters in the encoder,
-- attention biases if they are easy to isolate,
-- leave the backbone mostly frozen,
-- use head weights only for weighting or masking, not necessarily for adaptation.
-
-## 3. Implement `collect_params` and `configure_model`
-
-Every implementation in this repo uses the same pattern:
-
-1. freeze everything,
-2. selectively re-enable gradients for the allowed modules,
-3. return both the parameters and their names for debugging.
-
-Minimal pattern:
+`configure_model` freezes all parameters, enables the affine parameters of
+LayerNorm and BatchNorm modules, and adds parameters whose names match the
+glob patterns in `extra_parameter_patterns` (Section 3.3):
 
 ```python
-def collect_params(model, mode="layernorm_only"):
-    params, names = [], []
-    for name, module in model.named_modules():
-        ...
-    return params, names
+# Transformer: LayerNorm affine parameters and attention biases.
+parameters, names = configure_model(model, extra_parameter_patterns=("*attn*bias",))
 
-def configure_model(model, mode="layernorm_only"):
-    model.train()
-    model.requires_grad_(False)
-    for p in selected_params:
-        p.requires_grad_(True)
-    return model
+# CNN: BatchNorm affine parameters with current-batch statistics and the
+# weights of the add-on 1x1 convolutions.
+parameters, names = configure_model(
+    model,
+    use_batch_statistics=True,
+    extra_parameter_patterns=("*add_on_layers*weight",),
+)
+print(names)  # check the selected parameters
 ```
 
-Good references:
+`configure_model` puts the model in evaluation mode. With
+`use_batch_statistics=True`, the running buffers of the BatchNorm modules are
+removed, so they use current-batch statistics in both training and evaluation
+mode. The paper optimizes the selected
+parameters with Adam, `betas=(0.9, 0.999)` and zero weight decay; the adapter
+takes one optimizer step per batch with a non-empty reliable set.
 
-- [`ProtoViT/proto_entropy.py`](../ProtoViT/proto_entropy.py)
-- [`ProtoPFormer/proto_tta.py`](../ProtoPFormer/proto_tta.py)
+## 7. Reliable set
 
-## 4. Expose a `forward_no_adapt` Path
+The reliability indicator `m_i` uses the full prototype set:
 
-Metrics and VLM analysis need a forward path that **does not trigger adaptation**.
+- `use_geometric_filter=True` keeps samples whose maximum native response
+  exceeds `geometric_threshold`. The native response is the aggregated
+  `filter_scores` (default `prototype_scores`) as returned by the model; with
+  `score_mapping="distance"` it is the log-inverse-distance response of
+  Eq. 33. The threshold is therefore on the scale of the model's own score
+  (e.g. raw cosine `0.92` for ProtoViT, Eq. 36).
+- `entropy_filter_factor=f` additionally requires `H(p_i) < f ln C`
+  (ProtoPNet, Eq. 38). With `use_geometric_filter=False` it is the entropy
+  rule used in Table 3 (left).
+- Any other rule is computed by the model and returned as
+  `reliability_mask`, which replaces both conditions.
 
-Recommended convention:
+The selection rate in percent is
+`100 * adapter.stats["adapted_samples"] / adapter.stats["seen_samples"]`.
 
-```python
-def forward_no_adapt(self, x):
-    return self.model(x)
+## 8. Interpolation
+
+Both modes minimize
+
+```
+L = 1/(|R| + eps) * sum_{i in R} c_i * ( lambda_i * l_proto_i / (g_proto + eps)
+                                        + (1 - lambda_i) * l_out_i / (g_out + eps) )
 ```
 
-If your wrapper adapts inside `forward`, then `forward_no_adapt` is essential for:
+where `g_proto` and `g_out` are the detached gradient norms of the two
+confidence-weighted reliable-set components over all enabled parameters
+(Eqs. 59-61; `gradient_normalize=False` sets both scales to `1`). Both terms
+use the same confidence weight `c_i`.
 
-- PAC / PCA evaluation,
-- calibration-style metrics,
-- clean baseline collection,
-- precomputing explainability evidence.
+**Adaptive mode** (`interpolation_mode="adaptive"`) computes, for each
+reliable sample:
 
-## 5. Implement ProtoTTA
+1. `lambda_act`: the mean distance of the three largest pseudo-label
+   activations from `0.5`, divided by `delta0 = 0.25` and clipped to
+   `[0, 1]` (Eq. 45);
+2. `lambda_rel = r_proto / (r_proto + r_out + eps)` from the normalized margin
+   of the Top-3-mean class evidence and the normalized margin of the two
+   largest output probabilities (Eqs. 47-51);
+3. the consistency `q_proto` and `q_out` of each component's gradients on the
+   two interleaved halves of `R` (Eq. 53; `q = 0` with fewer than four reliable
+   samples or a zero half-gradient);
+4. the batch route `G = [q_proto >= 2 max(q_out, 1e-8) and q_proto >= 0.25]`
+   or the coverage guard `[mean r_out over R >= 0.90 and |R|/B <= 0.40]`
+   (Eqs. 54-57);
+5. `lambda_i = lambda_act` if `G` else `lambda_rel` (Eq. 58).
 
-The generic ProtoTTA loop is:
+All controller quantities, the route, and the gradient norms are detached.
+The coefficients can reach both `0` and `1`; there is no temporal smoothing.
+Setting `use_coverage_guard=False` removes the guard, and
+`gradient_normalize=False` removes the gradient normalization (the controller
+variants of Table 3, right). An adaptive update uses seven backward passes
+(Appendix N).
 
-```python
-1. run forward pass
-2. get pseudo-label from logits
-3. build target-prototype mask
-4. aggregate sub-prototypes if needed
-5. compute reliability mask from filter scores
-6. map prototype scores to probabilities in [0, 1]
-7. minimize binary entropy on target prototypes
-8. optionally weight by prototype importance and prediction confidence
-9. take one optimizer step
+**Fixed mode** (`interpolation_mode="fixed"`) uses `lambda_i = fixed_lambda`
+for every sample.
+
+Multi-branch models may return `activation_lambda` and `class_evidence`;
+these replace only the corresponding controller computation.
+
+## Appendix L settings of the four backbones
+
+The adapter settings below correspond to the configurations specified in
+Appendix L. The reported results were produced with the backbone
+implementations in [`EXISTING_BACKBONES.md`](./EXISTING_BACKBONES.md).
+
+| | ProtoViT | ProtoPFormer | ProtoPNet | ProtoLens |
+|---|---|---|---|---|
+| `prototype_scores` | sub-prototype cosine similarities `[B, P, 4]` | local (maximum over locations) and global responses `log((d + 1)/(d + 1e-4))`, concatenated | minimum squared distances `[B, P]` | cosine similarities to the 50 shared prototypes |
+| Mapping | `score_mapping="cosine"`, Top-2 mean | `score_mapper=lambda u: torch.sigmoid(torch.relu(u) - 1.0)` | `score_mapping="distance"` | `score_mapper=lambda u: torch.sigmoid(5.0 * u.clamp(-1.0, 1.0))` |
+| Routing | `prototype_class_identity` and `classifier_weights` | `prototype_class_identity` over the concatenated prototypes; `importance_weights` equal to one over the number of pseudo-label prototypes of the same branch, so each branch has weight 1/2 (Eq. 41) | `prototype_class_identity`, `use_importance_weighting=False` (Eq. 42) | `classifier_weights` only (Eqs. 43-44) |
+| Reliable set | `geometric_threshold=0.92` (Eq. 36) | `reliability_mask`: mean of the local and global maximum responses `> 0.55` (Eq. 37) | `geometric_threshold=0.8`, `entropy_filter_factor=0.4` (Eq. 38) | `reliability_mask`: mean of the 25 largest raw cosines `>= 0.1` (Eq. 39) |
+| Confidence weighting | on | on | `use_confidence_weighting=False` | `use_confidence_weighting=False` |
+| Controller | defaults | `activation_lambda` = mean of the local and global activation-margin coefficients (Eq. 46) | `gradient_epsilon=1e-8`, `controller_output_floor=0.0` | defaults |
+| Parameters | LayerNorm, `"*attn*bias"` | LayerNorm, `"*attn*bias"`; model in training mode | BatchNorm with `use_batch_statistics=True`, `"*add_on_layers*weight"` | LayerNorm, attention-projection biases |
+| Adam learning rate, batch size | `1e-3`, 128 | `1e-3`, 128 | `1e-3`, 64 | `5e-6`, 128 |
+
+As in Appendix L, call `reset()` between corruption types (for ProtoLens,
+between corruption-severity settings).
+
+## 9. Checks
+
+```bash
+python -m unittest -v ProtoTTA.tests.test_adapter
+python -m ProtoTTA.examples.medical_model
 ```
 
-## 6. Mapping Prototype Scores to Probability Space
-
-The binary-entropy loss expects prototype probabilities in `(0, 1)`.
-
-How to map depends on the native score type.
-
-### Cosine similarity in `[-1, 1]`
-
-Used by ProtoViT-style or cosine-based models.
-
-Options:
-
-- linear: `(s + 1) / 2`
-- sigmoid: `sigmoid(temp * s)`
-
-### Non-negative similarity or activation in `[0, +inf)`
-
-Used by pipelines with ReLU or other non-negative score heads.
-
-Option:
-
-- `sigmoid(s)`
-
-### Distance-based prototype values
-
-Used by ProtoPNet-style models.
-
-Options:
-
-- convert distance to similarity first,
-- or normalize the distance-derived activation into a stable probability range before entropy.
-
-The important point is not the exact formula. The important point is:
-
-- ambiguous prototype states should map near `0.5`,
-- confident matches should move toward `1`,
-- clear non-matches should move toward `0`.
-
-## 7. Target Prototype Selection
-
-This is the only part that is truly architecture-specific.
-
-### Case 1: explicit class ownership
-
-```python
-pred_class = logits.argmax(dim=1)
-proto_ids = prototype_class_identity.argmax(dim=1)
-target_mask = (proto_ids.unsqueeze(0) == pred_class.unsqueeze(1)).float()
-```
-
-### Case 2: shared prototypes with signed or weighted class contributions
-
-```python
-pred_class = logits.argmax(dim=1)
-class_weights = classifier.weight[pred_class]   # [B, P]
-target_mask = (class_weights > 0).float()
-```
-
-If your model uses more nuanced prototype routing, keep the same idea: ProtoTTA needs a per-sample binary or soft mask indicating which prototypes should be sharpened.
-
-## 8. Geometric Filtering
-
-ProtoTTA should not adapt on every sample blindly.
-
-Use a reliability score such as:
-
-- maximum prototype similarity,
-- top-k mean prototype similarity,
-- a dedicated filter score from the model,
-- a confidence-aware combination of prototype support and prediction entropy.
-
-Generic pattern:
-
-```python
-reliable = (filter_scores.max(dim=1)[0] > threshold).float()
-```
-
-If your model has sub-prototypes, aggregate them first with a stable rule such as:
-
-- `max`,
-- `mean`,
-- `median`,
-- `top_k_mean`.
-
-## 9. Prototype Importance Weighting
-
-If your classifier head tells you which prototypes matter most for a class, use it.
-
-Typical pattern:
-
-```python
-class_weights = classifier.weight[pred_class]     # [B, P]
-importance = abs(class_weights) * target_mask
-importance = importance / (importance.sum(dim=1, keepdim=True) + eps)
-```
-
-This lets ProtoTTA emphasize prototypes that actually contribute to the pseudo-label, instead of treating every target prototype equally.
-
-## 10. Confidence Weighting
-
-A useful extra stabilizer is:
-
-```python
-confidence = logits.softmax(dim=1).max(dim=1)[0]
-loss = (loss_per_sample * confidence * reliable).sum() / (reliable.sum() + eps)
-```
-
-This helps suppress updates from uncertain pseudo-labels.
-
-## 11. ProtoTTA+
-
-ProtoTTA+ keeps the prototype loss as the main driver but adds a second term, usually output entropy.
-
-Generic form:
-
-```python
-loss = proto_weight * prototype_binary_entropy
-loss += logit_weight * softmax_entropy(logits)
-```
-
-ProtoTTA+ is useful when:
-
-- prototype evidence alone is not enough,
-- the model head still carries meaningful uncertainty information,
-- you want a hybrid method that interpolates between prototype-aware and output-aware adaptation.
-
-Reference:
-
-- [`protopnet/proto_entropy_enchanced.py`](../protopnet/proto_entropy_enchanced.py)
-
-## 12. CNN vs ViT Notes
-
-### CNN-style prototype models
-
-Usually easier to adapt:
-
-- prototype vectors,
-- add-on conv layers,
-- normalization layers,
-- last layer.
-
-Filtering is often based on:
-
-- max pooled prototype support,
-- distance-derived similarity.
-
-### ViT-style prototype models
-
-Usually safer to adapt:
-
-- LayerNorm,
-- attention biases,
-- lightweight projection heads,
-- optional prototype-side modules.
-
-Filtering is often based on:
-
-- aggregated prototype similarities,
-- top-k mean over sub-prototypes,
-- explicit prototype support heads.
-
-## 13. Practical Checklist
-
-Before saying ProtoTTA is integrated, confirm:
-
-- your model exposes `logits`,
-- your model exposes `prototype_scores`,
-- you can define `filter_scores`,
-- you can define target prototypes per pseudo-label,
-- you implemented `collect_params`,
-- you implemented `configure_model`,
-- you implemented `forward_no_adapt`,
-- you can run one adaptation step without shape ambiguities,
-- you can collect clean baseline activations for metrics.
-
-## 14. Starting Template
-
-Use:
-
-- [`templates/prototta_adapter.py`](./templates/prototta_adapter.py)
-
-as the clean starting point for a new model.
+On the target model, check on a small batch that:
+
+1. the extracted tensors have the expected shapes and ranges;
+2. every sample selects at least one pseudo-label prototype;
+3. only the parameters printed by `configure_model` change after a step;
+4. a batch rejected by the reliable-set rule makes no optimizer step;
+5. `reset()` restores the source predictions;
+6. labels are used only for offline evaluation.

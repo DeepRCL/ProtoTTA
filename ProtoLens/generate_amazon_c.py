@@ -1,12 +1,14 @@
 """
 Generate Amazon-C (Corrupted Amazon) Dataset for TTA Evaluation.
 
-Creates corrupted versions of Amazon reviews using WildNLP library.
-Uses MORE SEVERE corruptions (70%, 80%, 90%) to create meaningful test scenarios.
+Creates corrupted versions of Amazon reviews using the WildNLP library:
+five corruption types (qwerty, swap, remove_char, mixed, aggressive) at four
+severities (20, 40, 60, 80 percent of words corrupted), i.e. 20 settings.
 
 Usage:
-    python generate_amazon_c.py
-    python generate_amazon_c.py --num_samples 4000 --severities 70 80 90
+    python generate_amazon_c.py --source_file /path/to/Amazon/test.csv \
+        --output_dir /path/to/Amazon-C --num_samples 4000 \
+        --severities 20 40 60 80 --seed 42
 
 Output:
     Datasets/Amazon-C/amazon_c_<corruption>_s<severity>.csv
@@ -208,7 +210,7 @@ def main():
     parser.add_argument('--num_samples', type=int, default=4000,
                        help='Number of samples (balanced 50/50)')
     parser.add_argument('--severities', type=int, nargs='+', 
-                       default=[70, 80, 90],
+                       default=[20, 40, 60, 80],
                        help='Severity levels (percentage of words to corrupt)')
     parser.add_argument('--corruption_types', type=str, nargs='+',
                        default=['qwerty', 'swap', 'remove_char', 'mixed', 'aggressive'],
@@ -220,7 +222,7 @@ def main():
     set_seed(args.seed)
     
     print("=" * 80)
-    print("Amazon-C Dataset Generator (Severe Corruptions)")
+    print("Amazon-C Dataset Generator")
     print("=" * 80)
     print(f"Source: {args.source_file}")
     print(f"Output: {args.output_dir}")

@@ -37,7 +37,6 @@ from datetime import datetime
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 # Import ProtoPNet
 from proto_baseline import ProtoPNetModel, ModelConfig, HeadConfig
@@ -59,7 +58,6 @@ from .noise_utils import get_all_corruption_types
 from .prototype_metrics import PrototypeMetricsEvaluator
 from .enhanced_prototype_metrics import EnhancedPrototypeMetrics
 from .efficiency_metrics import EfficiencyTracker
-from tta_baselines import CoTTA, CoTTAImageTransform
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -264,20 +262,6 @@ def setup_tent(model):
 
     optimizer = setup_optimizer(params)
     return tent.Tent(model, optimizer, steps=cfg_optim.STEPS, episodic=False)
-
-
-def setup_cotta(model):
-    """CoTTA with the same BN/add-on parameter subset as other SICAP baselines."""
-    model = tent.configure_model(model, adaptation_mode='batchnorm_addon')
-    params, _ = tent.collect_params(model, adaptation_mode='batchnorm_addon')
-    if not params:
-        raise RuntimeError('CoTTA found no batchnorm/add-on parameters to adapt')
-    optimizer = setup_optimizer(params)
-    return CoTTA(
-        model, optimizer, CoTTAImageTransform(mean, std, image_size=img_size),
-        steps=cfg_optim.STEPS, mt_alpha=0.999, rst_m=0.01, ap=0.92,
-        n_augmentations=32, symmetric_loss=False,
-    )
 
 
 def setup_eata(model, test_loader, device):
@@ -700,34 +684,20 @@ def evaluate_single_combination(model_path, corruption_type, severity,
             eval_model = base_model
         elif mode_name == 'Tent':
             eval_model = setup_tent(base_model)
-        elif mode_name == 'CoTTA':
-            eval_model = setup_cotta(base_model)
         elif mode_name == 'EATA':
             eval_model = setup_eata(base_model, test_loader, device)
-        elif mode_name == 'ProtoEntropy' or mode_name.startswith('ProtoEntropy-BN'):
-            geo_threshold = mode_config.get('geo_filter_threshold', 0.993)
-            adapt_mode = mode_config.get('adaptation_mode', 'all_adapt')
-            eval_model = setup_proto_entropy(base_model, geo_threshold, adapt_mode)
         elif mode_name == 'ProtoHybrid':
             geo_threshold = mode_config.get('geo_filter_threshold', 0.8)
             alpha_proto = mode_config.get('alpha_proto', 0.7)
             alpha_softmax = mode_config.get('alpha_softmax', 0.3)
             eval_model = setup_proto_hybrid(base_model, geo_threshold, alpha_proto, alpha_softmax)
         elif mode_name in (
-                'ProtoSampleAdaptive',
-                'ProtoSampleAdaptiveGradNorm',
-                'ProtoSampleAdaptiveRelative',
-                'ProtoSampleAdaptiveRelativeGradNorm',
-                'ProtoSampleAdaptiveTeacherMedian',
-                'ProtoSampleAdaptiveTeacherBatchMedian',
-                'ProtoSampleAdaptiveCoverageRouter',
-                'ProtoAuditForcedRelative',
                 'ProtoAuditForcedRelativeGradNorm',
-                'ProtoAuditFixedLambda0.2GradNorm',
                 'ProtoAuditForcedNativeGradNorm',
                 'ProtoAbsoluteConsistencyCoverageRouter',
-                'ProtoRatioOnlyRouter',
-                'ProtoAbsoluteOnlyRouter'):
+                'ProtoAbsoluteOnlyRouter',
+                'ProtoRouterNoGradNorm',
+                'ProtoMeanActRelGradNorm'):
             eval_model = setup_proto_samplewise_adaptive(
                 base_model,
                 geo_filter_threshold=mode_config.get(
@@ -1065,11 +1035,6 @@ def main():
         help='Path to clean test dataset'
     )
 
-    parser.add_argument(
-        '--skip-clean-evaluation',
-        action='store_true',
-        help='Run corruptions without loading any clean/source images'
-    )
 
     parser.add_argument(
         '--output',
@@ -1082,7 +1047,7 @@ def main():
         '--severity',
         type=int,
         default=5,
-        choices=[1, 2, 3, 4, 5],
+        choices=[5],
         help='Corruption severity to evaluate'
     )
 
@@ -1101,24 +1066,14 @@ def main():
     )
 
     parser.add_argument(
-        '--lambda-proto', '--lambda',
+        '--lambda-proto',
         dest='lambda_proto',
         type=float,
         default=0.7,
         help='ProtoHybrid prototype-loss weight; output-entropy weight is 1-lambda'
     )
 
-    parser.add_argument(
-        '--samplewise-adaptive-lambda',
-        action='store_true',
-        help='Evaluate samplewise adaptive lambda instead of legacy default modes'
-    )
 
-    parser.add_argument(
-        '--component-gradient-normalization',
-        action='store_true',
-        help='Use component gradient normalization with samplewise lambda'
-    )
 
     parser.add_argument(
         '--adaptive-delta0',
@@ -1134,24 +1089,6 @@ def main():
         help='Number of predicted-class prototype activations for lambda'
     )
 
-    parser.add_argument(
-        '--adaptive-controller',
-        choices=[
-            'absolute_distance',
-            'relative_margin',
-            'teacher_median',
-            'teacher_batch_median',
-            'coverage_router',
-            'absolute_consistency_router',
-            'ratio_only_router',
-            'absolute_only_router',
-            'forced_relative',
-            'forced_native',
-            'fixed_lambda_0.2',
-        ],
-        default='absolute_distance',
-        help='Source-free samplewise lambda controller'
-    )
 
     parser.add_argument(
         '--corruptions',
@@ -1163,8 +1100,22 @@ def main():
     parser.add_argument(
         '--modes',
         nargs='+',
-        default=None,
-        help='TTA modes to evaluate (default: all)'
+        required=True,
+        choices=[
+            'Normal',
+            'Tent',
+            'EATA',
+            'SAR',
+            'MEMO',
+            'ProtoHybrid',
+            'ProtoAbsoluteConsistencyCoverageRouter',
+            'ProtoAuditForcedNativeGradNorm',
+            'ProtoAuditForcedRelativeGradNorm',
+            'ProtoMeanActRelGradNorm',
+            'ProtoAbsoluteOnlyRouter',
+            'ProtoRouterNoGradNorm',
+        ],
+        help='TTA modes to evaluate'
     )
 
     parser.add_argument(
@@ -1181,12 +1132,6 @@ def main():
         help='Compute prototype-based metrics (PAC, PCA, Sparsity)'
     )
 
-    parser.add_argument(
-        '--proto-baseline-samples',
-        type=int,
-        default=None,
-        help='Deprecated: paired metrics always use the complete cohort'
-    )
 
     parser.add_argument(
         '--clean-reference-cache',
@@ -1197,13 +1142,9 @@ def main():
 
     parser.add_argument(
         '--stream-order',
-        choices=['seeded_random', 'class_order'],
+        choices=['seeded_random'],
         default='seeded_random',
-        help=(
-            'Online sample order. seeded_random reproduces the historical '
-            'fixed random SICAPv2-C stream; class_order is the separate '
-            'label-correlated stress-test protocol.'
-        )
+        help='Online sample order: a fixed random permutation seeded by --stream-order-seed'
     )
 
     parser.add_argument(
@@ -1226,11 +1167,6 @@ def main():
         help='Fail if --output already exists instead of resuming it'
     )
 
-    parser.add_argument(
-        '--clean-reference-only',
-        action='store_true',
-        help='Build/validate --clean-reference-cache and exit'
-    )
 
     parser.add_argument(
         '--track-efficiency',
@@ -1239,22 +1175,7 @@ def main():
         help='Track computational efficiency metrics'
     )
 
-    parser.add_argument(
-        '--geo_filter_threshold',
-        type=float,
-        default=0.993,
-        help='ProtoEntropy geometric filtering threshold (for ProtoEntropy mode)'
-    )
 
-    parser.add_argument(
-        '--adaptation_mode',
-        type=str,
-        default='all_adapt',
-        choices=['batchnorm_only', 'batchnorm_addon', 'batchnorm_proto', 'all_adapt'],
-        help='ProtoEntropy adaptation mode (for ProtoEntropy mode). '
-             'Options: batchnorm_only, batchnorm_addon, batchnorm_proto, all_adapt. '
-             'Default: all_adapt. Note: ProtoEntropy-BN uses batchnorm_addon at 0.995 threshold.'
-    )
 
     args = parser.parse_args()
 
@@ -1299,85 +1220,11 @@ def main():
     all_modes = {
         'Normal': {},
         'Tent': {},
-        'CoTTA': {
-            'learning_rate': 1e-3,
-            'adaptation_mode': 'batchnorm_addon',
-            'mt_alpha': 0.999,
-            'rst_m': 0.01,
-            'ap': 0.92,
-            'n_augmentations': 32,
-            'symmetric_loss': False,
-            'episodic': False,
-        },
         'EATA': {},
-        'ProtoEntropy': {
-            'geo_filter_threshold': args.geo_filter_threshold,
-            'adaptation_mode': args.adaptation_mode
-        },
-        'ProtoEntropy-BN-0.98': {
-            'geo_filter_threshold': 0.98,
-            'adaptation_mode': 'batchnorm_addon'
-        },
         'ProtoHybrid': {
             'geo_filter_threshold': 0.8,
             'alpha_proto': args.lambda_proto,
             'alpha_softmax': 1.0 - args.lambda_proto
-        },
-        'ProtoSampleAdaptive': {
-            'geo_filter_threshold': 0.8,
-            'delta0': args.adaptive_delta0,
-            'top_k': args.adaptive_top_k,
-            'component_gradient_normalization': False,
-            'adaptive_controller': 'absolute_distance',
-        },
-        'ProtoSampleAdaptiveGradNorm': {
-            'geo_filter_threshold': 0.8,
-            'delta0': args.adaptive_delta0,
-            'top_k': args.adaptive_top_k,
-            'component_gradient_normalization': True,
-            'adaptive_controller': 'absolute_distance',
-        },
-        'ProtoSampleAdaptiveRelative': {
-            'geo_filter_threshold': 0.8,
-            'delta0': args.adaptive_delta0,
-            'top_k': args.adaptive_top_k,
-            'component_gradient_normalization': False,
-            'adaptive_controller': 'relative_margin',
-        },
-        'ProtoSampleAdaptiveRelativeGradNorm': {
-            'geo_filter_threshold': 0.8,
-            'delta0': args.adaptive_delta0,
-            'top_k': args.adaptive_top_k,
-            'component_gradient_normalization': True,
-            'adaptive_controller': 'relative_margin',
-        },
-        'ProtoSampleAdaptiveTeacherMedian': {
-            'geo_filter_threshold': 0.8,
-            'delta0': args.adaptive_delta0,
-            'top_k': args.adaptive_top_k,
-            'component_gradient_normalization': False,
-            'adaptive_controller': 'teacher_median',
-        },
-        'ProtoSampleAdaptiveTeacherBatchMedian': {
-            'geo_filter_threshold': 0.8,
-            'delta0': args.adaptive_delta0,
-            'top_k': args.adaptive_top_k,
-            'component_gradient_normalization': False,
-            'adaptive_controller': 'teacher_batch_median',
-        },
-        'ProtoSampleAdaptiveCoverageRouter': {
-            'geo_filter_threshold': 0.8,
-            'delta0': args.adaptive_delta0,
-            'top_k': args.adaptive_top_k,
-            'component_gradient_normalization': True,
-            'adaptive_controller': 'coverage_router',
-        },
-        'ProtoAuditForcedRelative': {
-            'geo_filter_threshold': 0.8,
-            'delta0': args.adaptive_delta0,
-            'top_k': args.adaptive_top_k,
-            'component_gradient_normalization': False,
-            'adaptive_controller': 'forced_relative',
         },
         'ProtoAuditForcedRelativeGradNorm': {
             'geo_filter_threshold': 0.8,
@@ -1385,13 +1232,6 @@ def main():
             'top_k': args.adaptive_top_k,
             'component_gradient_normalization': True,
             'adaptive_controller': 'forced_relative',
-        },
-        'ProtoAuditFixedLambda0.2GradNorm': {
-            'geo_filter_threshold': 0.8,
-            'delta0': args.adaptive_delta0,
-            'top_k': args.adaptive_top_k,
-            'component_gradient_normalization': True,
-            'adaptive_controller': 'fixed_lambda_0.2',
         },
         'ProtoAuditForcedNativeGradNorm': {
             'geo_filter_threshold': 0.8,
@@ -1407,13 +1247,6 @@ def main():
             'component_gradient_normalization': True,
             'adaptive_controller': 'absolute_consistency_router',
         },
-        'ProtoRatioOnlyRouter': {
-            'geo_filter_threshold': 0.8,
-            'delta0': args.adaptive_delta0,
-            'top_k': args.adaptive_top_k,
-            'component_gradient_normalization': True,
-            'adaptive_controller': 'ratio_only_router',
-        },
         'ProtoAbsoluteOnlyRouter': {
             'geo_filter_threshold': 0.8,
             'delta0': args.adaptive_delta0,
@@ -1423,102 +1256,62 @@ def main():
         },
         'SAR': {},
         'MEMO': {},
+        'ProtoRouterNoGradNorm': {
+            'geo_filter_threshold': 0.8,
+            'delta0': args.adaptive_delta0,
+            'top_k': args.adaptive_top_k,
+            'component_gradient_normalization': False,
+            'adaptive_controller': 'absolute_consistency_router',
+        },
+        'ProtoMeanActRelGradNorm': {
+            'geo_filter_threshold': 0.8,
+            'delta0': args.adaptive_delta0,
+            'top_k': args.adaptive_top_k,
+            'component_gradient_normalization': True,
+            'adaptive_controller': 'mean_act_rel',
+        },
     }
 
-    if args.modes:
-        modes = {k: v for k, v in all_modes.items() if k in args.modes}
-        missing_modes = sorted(set(args.modes) - set(modes))
-        if missing_modes:
-            parser.error(f'unknown modes: {missing_modes}')
-    elif args.samplewise_adaptive_lambda:
-        if args.adaptive_controller == 'coverage_router':
-            adaptive_mode = 'ProtoSampleAdaptiveCoverageRouter'
-        elif args.adaptive_controller == 'teacher_batch_median':
-            adaptive_mode = 'ProtoSampleAdaptiveTeacherBatchMedian'
-        elif args.adaptive_controller == 'teacher_median':
-            adaptive_mode = 'ProtoSampleAdaptiveTeacherMedian'
-        elif args.adaptive_controller == 'relative_margin':
-            adaptive_mode = (
-                'ProtoSampleAdaptiveRelativeGradNorm'
-                if args.component_gradient_normalization
-                else 'ProtoSampleAdaptiveRelative'
-            )
-        else:
-            adaptive_mode = (
-                'ProtoSampleAdaptiveGradNorm'
-                if args.component_gradient_normalization
-                else 'ProtoSampleAdaptive'
-            )
-        modes = {adaptive_mode: all_modes[adaptive_mode]}
-    else:
-        legacy_mode_names = [
-            'Normal', 'Tent', 'EATA', 'ProtoEntropy',
-            'ProtoEntropy-BN-0.98', 'ProtoHybrid', 'SAR', 'MEMO',
-        ]
-        modes = {name: all_modes[name] for name in legacy_mode_names}
+    modes = {k: v for k, v in all_modes.items() if k in args.modes}
+    missing_modes = sorted(set(args.modes) - set(modes))
+    if missing_modes:
+        parser.error(f'unknown modes: {missing_modes}')
 
     severity = args.severity
     severity_key = str(severity)  # Use "5" not "severity_5" to match ProtoViT format
     batch_size = args.batch_size
 
     provenance = evaluator_provenance(args.model)
-    if args.skip_clean_evaluation:
-        if args.prototype_metrics:
-            raise ValueError(
-                '--prototype-metrics requires clean data; disable it for a '
-                'strictly source-free run'
-            )
-        clean_reference = None
-        clean_identity = None
-        clean_accuracy = None
-        print("\nSkipping clean-data evaluation (source-free protocol).")
-    else:
-        print("\n" + "="*80)
-        print("UNADAPTED MODEL PERFORMANCE ON CLEAN DATA")
-        print("="*80)
-        transform_clean = transforms.Compose([
-            transforms.Resize(size=(img_size, img_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std)
-        ])
-        clean_dataset = datasets.ImageFolder(
-            args.clean_data_dir, transform_clean
-        )
-        raw_clean_identity = dataset_identity(clean_dataset)
-        clean_stream_indices = fixed_stream_indices(
-            raw_clean_identity['num_samples'], args.stream_order,
-            args.stream_order_seed
-        )
-        clean_identity = identity_in_stream_order(
-            raw_clean_identity, clean_stream_indices
-        )
-        if (args.proto_baseline_samples is not None and
-                args.proto_baseline_samples != clean_identity['num_samples']):
-            raise ValueError(
-                '--proto-baseline-samples cannot subset paired metrics: '
-                f"requested {args.proto_baseline_samples}, controlled N is "
-                f"{clean_identity['num_samples']}"
-            )
-        clean_reference = load_or_collect_clean_reference(
-            args, device, clean_dataset, clean_identity, provenance
-        )
-        clean_accuracy = float(clean_reference['accuracy'])
-        print(f"Clean accuracy (unadapted): {clean_accuracy*100:.2f}%")
-        print(f"Paired samples: {clean_identity['num_samples']}")
-        print(
-            'Sample-ID SHA-256: '
-            f"{clean_identity['sample_id_hash_sha256']}"
-        )
-        print("="*80 + "\n")
-
-    if args.clean_reference_only:
-        if args.skip_clean_evaluation or not args.clean_reference_cache:
-            parser.error(
-                '--clean-reference-only requires --clean-reference-cache and '
-                'clean evaluation'
-            )
-        print('Clean-reference-only job complete.')
-        return
+    print("\n" + "="*80)
+    print("UNADAPTED MODEL PERFORMANCE ON CLEAN DATA")
+    print("="*80)
+    transform_clean = transforms.Compose([
+        transforms.Resize(size=(img_size, img_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=mean, std=std)
+    ])
+    clean_dataset = datasets.ImageFolder(
+        args.clean_data_dir, transform_clean
+    )
+    raw_clean_identity = dataset_identity(clean_dataset)
+    clean_stream_indices = fixed_stream_indices(
+        raw_clean_identity['num_samples'], args.stream_order,
+        args.stream_order_seed
+    )
+    clean_identity = identity_in_stream_order(
+        raw_clean_identity, clean_stream_indices
+    )
+    clean_reference = load_or_collect_clean_reference(
+        args, device, clean_dataset, clean_identity, provenance
+    )
+    clean_accuracy = float(clean_reference['accuracy'])
+    print(f"Clean accuracy (unadapted): {clean_accuracy*100:.2f}%")
+    print(f"Paired samples: {clean_identity['num_samples']}")
+    print(
+        'Sample-ID SHA-256: '
+        f"{clean_identity['sample_id_hash_sha256']}"
+    )
+    print("="*80 + "\n")
 
     # Load existing results for resumability
     results_dict, _ = load_existing_results(args.output)
@@ -1663,8 +1456,8 @@ def main():
                     'num_workers': 4,
                     'adaptation_mode': 'batchnorm_addon',
                     'initial_model_mode': 'eval',
-                    'source_free': args.skip_clean_evaluation,
-                    'clean_data_loaded': not args.skip_clean_evaluation,
+                    'source_free': False,
+                    'clean_data_loaded': True,
                     'controlled_cohort_name': args.controlled_cohort_name,
                 },
                 'runtime': {
@@ -1703,7 +1496,7 @@ def main():
                 'evaluator_diff_sha256': provenance['evaluator_diff_sha256'],
                 'clean_reference_cache': args.clean_reference_cache,
                 'prototype_metrics_enabled': args.prototype_metrics,
-                'proto_baseline_samples': args.proto_baseline_samples if args.prototype_metrics else None,
+                'proto_baseline_samples': None,
                 'efficiency_tracking_enabled': args.track_efficiency,
             }
             save_results_json(args.output, results_dict, metadata)

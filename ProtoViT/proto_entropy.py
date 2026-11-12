@@ -84,9 +84,12 @@ class ProtoEntropy(nn.Module):
                  semantic_logit_blend=0.0,
                  semantic_fusion='fixed',
                  semantic_contrast_weight=0.0,
-                 semantic_temperature=0.25):
+                 semantic_temperature=0.25,
+                 entropy_filter_margin=None):
         """
         Args:
+            entropy_filter_margin: if not None, replace the geometric filter by
+                EATA's reliability rule H(p_i) < margin (Table 3, left).
             episodic: If True, uses 'episodic' reset_mode (backward compatibility)
             reset_mode: 'episodic' (reset every sample), 'periodic' (reset every N batches),
                        'confidence' (reset when confidence drops), 'ema' (exponential moving average),
@@ -166,6 +169,11 @@ class ProtoEntropy(nn.Module):
         self.semantic_fusion = semantic_fusion
         self.semantic_contrast_weight = float(semantic_contrast_weight)
         self.semantic_temperature = float(semantic_temperature)
+        self.entropy_filter_margin = (
+            None if entropy_filter_margin is None else float(entropy_filter_margin)
+        )
+        if self.entropy_filter_margin is not None and use_geometric_filter:
+            raise ValueError('entropy_filter_margin replaces the geometric filter; disable one')
         if semantic_prototype_weights is None:
             semantic_prototype_weights = torch.ones(
                 model.prototype_class_identity.shape[0], dtype=torch.float32
@@ -501,6 +509,16 @@ class ProtoEntropy(nn.Module):
                 # If no reliable samples, skip adaptation
                 if reliable_mask.sum() == 0:
                     return logits, min_distances, similarities
+        elif self.entropy_filter_margin is not None:
+            # EATA's reliability rule on the current prediction: H(p_i) < E0.
+            with torch.no_grad():
+                filter_entropy = -(logits.softmax(1) * logits.log_softmax(1)).sum(1)
+                reliable_mask = (filter_entropy < self.entropy_filter_margin).float()
+                adapted_count = int(reliable_mask.sum().item())
+                self.adaptation_stats['adapted_samples'] += adapted_count
+                self.adaptation_stats['total_updates'] += adapted_count
+                if adapted_count == 0:
+                    return logits, min_distances, similarities
         else:
             # All samples are considered reliable
             reliable_mask = torch.ones(logits.shape[0], device=logits.device)
@@ -723,7 +741,30 @@ class ProtoEntropy(nn.Module):
         router_gate_fraction = None
         if self.adaptive_lambda:
             valid = reliable_mask.bool()
-            if self.adaptive_lambda_strategy == 'activation_margin':
+            if self.adaptive_lambda_strategy == 'mean_act_rel':
+                # Simplest label-free combination of the two estimates:
+                # their sample-wise average, with no gradient routing.
+                masked_target = positive_scores.masked_fill(
+                    ~class_target_mask.bool(), float('-inf')
+                )
+                k_target = min(
+                    self.adaptive_topk,
+                    int(class_target_mask.sum(dim=1).min().item()),
+                )
+                top_target = masked_target.topk(max(k_target, 1), dim=1).values
+                native_score = (
+                    (top_target - 0.5).abs().mean(dim=1)
+                    / max(self.adaptive_delta0, 1e-8)
+                ).clamp(0.0, 1.0)
+                relative_score, proto_reliability, output_reliability = \
+                    relative_evidence_lambda(
+                        logits=logits,
+                        similarities=positive_scores,
+                        prototype_classes=proto_identities,
+                        topk=self.adaptive_topk,
+                    )
+                adaptive_score = 0.5 * (native_score + relative_score)
+            elif self.adaptive_lambda_strategy == 'activation_margin':
                 masked_target = positive_scores.masked_fill(~class_target_mask.bool(), float('-inf'))
                 k_target = min(
                     self.adaptive_topk,

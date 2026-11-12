@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
+SEEDS = (0, 2, 3)
 CORRUPTIONS = (
     "gaussian_noise", "shot_noise", "impulse_noise", "speckle_noise",
     "gaussian_blur", "defocus_blur", "fog", "frost",

@@ -1,4 +1,4 @@
-name: echofar
+name: prototta-flash
 channels:
   - defaults
 dependencies:

@@ -5,9 +5,9 @@ Evaluates model performance across specified corruption types at severity 5.
 Saves results iteratively to JSON for resumability.
 
 Usage:
-    python evaluate_robustness.py --model ./saved_models/best_model.pth \
-                                   --data_dir ./datasets/cub200_c/ \
-                                   --output ./robustness_results_sev5.json
+    python evaluate_robustness.py --model /path/to/protovit_checkpoint.pth \
+                                   --data_dir /path/to/cub200_c/ \
+                                   --output /path/to/results/protovit.json
 """
 
 import os
@@ -20,6 +20,8 @@ import torchvision.datasets as datasets
 import numpy as np
 from pathlib import Path
 import json
+import math
+import hashlib
 import time
 from datetime import datetime
 import logging
@@ -34,15 +36,11 @@ from preprocess import mean, std
 from noise_utils import get_corrupted_transform
 import tent
 import proto_entropy
-import loss_adapt
 import eata_adapt
 import sar_adapt
 from prototype_tta_metrics import PrototypeMetricsEvaluator
 from enhanced_prototype_metrics import EnhancedPrototypeMetrics
 from efficiency_metrics import EfficiencyTracker, compare_efficiency_metrics
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from tta_baselines import CoTTA, CoTTAImageTransform
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -94,51 +92,12 @@ def setup_optimizer(params, lr=None):
         raise NotImplementedError
 
 
-def setup_tent(model):
-    """Set up Tent adaptation."""
+def setup_tent(model, lr=None):
+    """Set up Tent adaptation. lr=None keeps cfg.OPTIM.LR (1e-3)."""
     model = tent.configure_model(model)
     params, param_names = tent.collect_params(model)
-    optimizer = setup_optimizer(params)
+    optimizer = setup_optimizer(params, lr=lr)
     return tent.Tent(model, optimizer, steps=cfg.OPTIM.STEPS, episodic=cfg.MODEL.EPISODIC)
-
-
-def setup_cotta(model, config=None):
-    """Set up CoTTA with the configured transformer parameter subset."""
-    config = config or {}
-    adaptation_mode = config.get('adaptation_mode', 'layernorm_attn_bias')
-    if adaptation_mode == 'reference_weights':
-        # Match the reference collector: module-local weights and biases.
-        # Prototype vectors and patch-selection tensors are not weight/bias.
-        model.train()
-        model.requires_grad_(False)
-        params = []
-        for module in model.modules():
-            for name, parameter in module.named_parameters(recurse=False):
-                if name in ('weight', 'bias'):
-                    parameter.requires_grad_(True)
-                    params.append(parameter)
-            if isinstance(module, torch.nn.BatchNorm2d):
-                module.track_running_stats = False
-                module.running_mean = None
-                module.running_var = None
-    else:
-        model = proto_entropy.configure_model(model, adaptation_mode=adaptation_mode)
-        params, _ = proto_entropy.collect_params(model, adaptation_mode=adaptation_mode)
-    # Some collectors traverse attention modules recursively; avoid duplicates.
-    params = list({id(parameter): parameter for parameter in params}.values())
-    if 'model_mode' in config:
-        if config['model_mode'] not in ('train', 'eval'):
-            raise ValueError('CoTTA model_mode must be train or eval')
-        model.train(config['model_mode'] == 'train')
-    optimizer = setup_optimizer(params, lr=config.get('lr'))
-    return CoTTA(
-        model, optimizer, CoTTAImageTransform(mean, std, image_size=img_size),
-        steps=config.get('steps', cfg.OPTIM.STEPS), episodic=cfg.MODEL.EPISODIC,
-        mt_alpha=config.get('mt_alpha', 0.999), rst_m=config.get('rst_m', 0.001),
-        ap=config.get('ap', 0.1), n_augmentations=config.get('n_augmentations', 32),
-        teacher_train=config.get('teacher_train', False),
-        record_diagnostics=config.get('record_diagnostics', False),
-    )
 
 
 def setup_proto_entropy(model, use_importance=False, use_confidence=False,
@@ -170,7 +129,8 @@ def setup_proto_entropy(model, use_importance=False, use_confidence=False,
                         semantic_logit_blend=0.0,
                         semantic_fusion='fixed',
                         semantic_contrast_weight=0.0,
-                        semantic_temperature=0.25):
+                        semantic_temperature=0.25,
+                        entropy_filter_factor=None):
     """Set up Prototype Entropy adaptation (without threshold).
     
     Args:
@@ -194,6 +154,12 @@ def setup_proto_entropy(model, use_importance=False, use_confidence=False,
     params, param_names = proto_entropy.collect_params(model, adaptation_mode=adaptation_mode)
     
     optimizer = setup_optimizer(params, lr=optimizer_lr)
+    entropy_filter_margin = None
+    if entropy_filter_factor is not None:
+        num_classes = model.last_layer.weight.shape[0]
+        entropy_filter_margin = float(entropy_filter_factor) * math.log(num_classes)
+        print(f"Entropy reliability filter: H(p) < {entropy_filter_factor} * ln({num_classes}) "
+              f"= {entropy_filter_margin:.4f}")
     proto_model = proto_entropy.ProtoEntropy(
         model,
         optimizer,
@@ -233,24 +199,27 @@ def setup_proto_entropy(model, use_importance=False, use_confidence=False,
         semantic_fusion=semantic_fusion,
         semantic_contrast_weight=semantic_contrast_weight,
         semantic_temperature=semantic_temperature,
+        entropy_filter_margin=entropy_filter_margin,
     )
     return proto_model
 
 
-def setup_loss_adapt(model):
-    """Set up Loss-based adaptation."""
-    model = loss_adapt.configure_model(model)
-    params, param_names = loss_adapt.collect_params(model)
-    optimizer = setup_optimizer(params)
-    return loss_adapt.LossAdapt(model, optimizer, steps=cfg.OPTIM.STEPS, episodic=cfg.MODEL.EPISODIC)
+def setup_eata(model, fishers, lr=None, e_margin_factor=None):
+    """Set up EATA adaptation (defaults reproduce the main-table EATA configuration).
 
-
-def setup_eata(model, fishers):
-    """Set up EATA adaptation."""
+    lr=None keeps cfg.OPTIM.LR; e_margin_factor=None keeps the EATA class default
+    E0 = ln(1000)/2 - 1; otherwise E0 = e_margin_factor * ln(C), C = number of classes.
+    """
+    num_classes = model.num_classes
     model = eata_adapt.configure_model(model)
     params, param_names = eata_adapt.collect_params(model)
-    optimizer = setup_optimizer(params)
-    return eata_adapt.EATA(model, optimizer, fishers=fishers, steps=cfg.OPTIM.STEPS, episodic=cfg.MODEL.EPISODIC)
+    optimizer = setup_optimizer(params, lr=lr)
+    kwargs = {}
+    if e_margin_factor is not None:
+        kwargs['e_margin'] = e_margin_factor * math.log(num_classes)
+        print(f"EATA E0 = {e_margin_factor} * ln({num_classes}) = {kwargs['e_margin']:.6f}")
+    return eata_adapt.EATA(model, optimizer, fishers=fishers, steps=cfg.OPTIM.STEPS,
+                           episodic=cfg.MODEL.EPISODIC, **kwargs)
 
 
 def setup_sar(model):
@@ -308,13 +277,15 @@ def _protovit_activations(raw_outputs):
     return similarities
 
 
-def evaluate_model(model, loader, description="Inference", verbose=True, 
+def evaluate_model(model, loader, description="Inference", verbose=True,
                    proto_evaluator=None, compute_proto_metrics=False,
-                   efficiency_tracker=None):
+                   efficiency_tracker=None, correct_out=None):
     """Run evaluation and return accuracy (and optionally prototype metrics).
-    
+
     Args:
         efficiency_tracker: Optional EfficiencyTracker to record per-batch timing
+        correct_out: Optional list; per-batch boolean correctness tensors (stream order) are
+            appended to it (used by the stream protocols for per-domain accuracy).
     """
     if verbose:
         print(f'\n{description}...')
@@ -323,17 +294,10 @@ def evaluate_model(model, loader, description="Inference", verbose=True,
     # hook records the exact backbone output that produced the returned logits,
     # so online TTA is never replayed from its final checkpoint.
     model.eval()
-    actual_model = (
-        model.metric_model if hasattr(model, 'metric_model')
-        else model.model if hasattr(model, 'model') else model
-    )
+    actual_model = model.model if hasattr(model, 'model') else model
     raw_outputs = []
     hook = None
-    # CoTTA exposes the exact teacher output used for its prediction.  Avoid a
-    # hook in that case: augmentation ensembling performs many teacher forwards
-    # and retaining every raw output needlessly increases GPU memory.
-    if (compute_proto_metrics and proto_evaluator is not None
-            and not hasattr(model, 'last_metric_output')):
+    if compute_proto_metrics and proto_evaluator is not None:
         hook = actual_model.register_forward_hook(
             lambda _module, _inputs, output: raw_outputs.append(output)
         )
@@ -360,13 +324,11 @@ def evaluate_model(model, loader, description="Inference", verbose=True,
             predicted = logits.argmax(dim=1)
             n_correct += predicted.eq(labels).sum().item()
             n_examples += batch_size
+            if correct_out is not None:
+                correct_out.append(predicted.eq(labels).detach().cpu())
 
             if compute_proto_metrics and proto_evaluator is not None:
-                raw = getattr(model, 'last_metric_output', None)
-                if raw is None:
-                    raw = _find_matching_raw_output(raw_outputs, logits)
-                elif _output_logits(raw).data_ptr() != logits.data_ptr():
-                    raise RuntimeError('CoTTA metric output does not match returned logits')
+                raw = _find_matching_raw_output(raw_outputs, logits)
                 activations = _protovit_activations(raw)
                 all_activations.append(activations.detach().cpu())
                 all_logits.append(logits.detach().cpu())
@@ -403,16 +365,47 @@ def evaluate_model(model, loader, description="Inference", verbose=True,
     return accu, proto_metrics
 
 
-def load_corrupted_dataset(data_dir, corruption_type, severity, batch_size=None):
-    """Load a pre-generated corrupted dataset."""
+# ---- Stream protocols (Appendix M). Opt-in: without --stream/--stream-order the default
+# protocol is unchanged (ImageFolder order, i.e. sorted by class; model reset per
+# corruption). ----
+
+
+class FixedOrderSampler(torch.utils.data.Sampler):
+    """Yields the same pre-drawn index order on every pass (EATA's Fisher pass and the
+    adaptation pass therefore see the same stream), independent of the global RNG."""
+
+    def __init__(self, order):
+        self.order = [int(i) for i in order]
+
+    def __iter__(self):
+        return iter(self.order)
+
+    def __len__(self):
+        return len(self.order)
+
+
+def stream_permutation(n, seed, key):
+    """Seeded permutation of range(n); identical for every method given (seed, key)."""
+    digest = hashlib.sha256(f'{seed}:{key}'.encode()).hexdigest()
+    generator = torch.Generator().manual_seed(int(digest[:15], 16))
+    return torch.randperm(n, generator=generator).tolist()
+
+
+def load_corrupted_dataset(data_dir, corruption_type, severity, batch_size=None,
+                           order_seed=None):
+    """Load a pre-generated corrupted dataset.
+
+    order_seed=None keeps the default order (shuffle=False); otherwise the stream is a fixed
+    seeded permutation (stream_permutation(n, order_seed, corruption_type)).
+    """
     if batch_size is None:
         batch_size = test_batch_size
-    
+
     corruption_path = Path(data_dir) / corruption_type / str(severity)
-    
+
     if not corruption_path.exists():
         raise FileNotFoundError(f"Corrupted dataset not found at {corruption_path}")
-    
+
     # Simple transform: just resize, to tensor, and normalize
     # (corruption already applied in the saved images)
     transform = transforms.Compose([
@@ -420,16 +413,25 @@ def load_corrupted_dataset(data_dir, corruption_type, severity, batch_size=None)
         transforms.ToTensor(),
         transforms.Normalize(mean=mean, std=std)
     ])
-    
+
     dataset = datasets.ImageFolder(corruption_path, transform)
-    loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=8,
-        pin_memory=False
-    )
-    
+    if order_seed is None:
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=8,
+            pin_memory=False
+        )
+    else:
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            sampler=FixedOrderSampler(stream_permutation(len(dataset), order_seed, corruption_type)),
+            num_workers=8,
+            pin_memory=False
+        )
+
     return loader
 
 
@@ -494,15 +496,95 @@ def save_results_json(output_file, results_dict, metadata=None):
         raise
 
 
+def build_eval_model(model_path, mode_name, mode_config, device, fishers, fisher_loader):
+    """Load the source checkpoint and wrap it for mode_name (shared by the per-corruption
+    and stream protocols). EATA without precomputed fishers computes them on the first
+    ~500 samples of fisher_loader (the current test stream), as in the main experiments.
+    Returns (base_model, eval_model); eval_model is None for an unknown mode."""
+    # Load fresh model
+    base_model = torch.load(model_path, weights_only=False)
+    base_model = base_model.to(device)
+    base_model.eval()
+
+    # Setup adaptation based on mode
+    if mode_name == 'normal':
+        eval_model = base_model
+    elif mode_name == 'tent':
+        eval_model = setup_tent(base_model, lr=mode_config.get('lr'))
+    elif mode_name.startswith('proto_imp_conf'):
+        # ProtoEntropy with canonical or explicitly ablated weighting.
+        eval_model = setup_proto_entropy(
+            base_model,
+            use_importance=mode_config.get('use_importance', True),
+            use_confidence=mode_config.get('use_confidence', True),
+            reset_mode=mode_config.get('reset_mode', None),
+            reset_frequency=mode_config.get('reset_frequency', 10),
+            confidence_threshold=mode_config.get('confidence_threshold', 0.7),
+            ema_alpha=mode_config.get('ema_alpha', 0.999),
+            use_geometric_filter=mode_config.get('use_geometric_filter', False),
+            geo_filter_threshold=mode_config.get('geo_filter_threshold', 0.3),
+            consensus_strategy=mode_config.get('consensus_strategy', 'max'),
+            consensus_ratio=mode_config.get('consensus_ratio', 0.5),
+            adaptation_mode=mode_config.get('adaptation_mode', 'layernorm_only'),
+            use_ensemble_entropy=mode_config.get('use_ensemble_entropy', False),
+            source_proto_stats=mode_config.get('source_proto_stats', None),
+            alpha_source_kl=mode_config.get('alpha_source_kl', 0.0),
+            adapt_all_prototypes=mode_config.get('adapt_all_prototypes', False),
+            logit_weight=mode_config.get('logit_weight', 0.0),
+            shared_confidence_weighting=mode_config.get('shared_confidence_weighting', False),
+            gradient_normalize=mode_config.get('gradient_normalize', False),
+            adaptive_lambda=mode_config.get('adaptive_lambda', False),
+            adaptive_lambda_strategy=mode_config.get('adaptive_lambda_strategy', 'relative_reliability'),
+            adaptive_delta0=mode_config.get('adaptive_delta0', 0.25),
+            adaptive_topk=mode_config.get('adaptive_topk', 3),
+            router_min_consistency=mode_config.get('router_min_consistency', 0.25),
+            lambda_ema_momentum=mode_config.get('lambda_ema_momentum', 0.9),
+            lambda_min=mode_config.get('lambda_min', 0.05),
+            lambda_max=mode_config.get('lambda_max', 0.95),
+            record_diagnostics=mode_config.get('record_diagnostics', False),
+            samplewise_lambda=mode_config.get('samplewise_lambda', False),
+            optimizer_lr=mode_config.get('optimizer_lr', None),
+            entropy_filter_factor=mode_config.get('entropy_filter_factor', None),
+        )
+        
+        # Reset geo filter stats if applicable
+        if mode_config.get('use_geometric_filter', False) and hasattr(eval_model, 'reset_geo_filter_stats'):
+            eval_model.reset_geo_filter_stats()
+    elif mode_name == 'eata':
+        if fishers is None:
+            # Compute Fishers on test data (source-free)
+            fisher_model = torch.load(model_path, weights_only=False)
+            fisher_model = fisher_model.to(device)
+            fisher_model = eata_adapt.configure_model(fisher_model)
+            current_fishers = eata_adapt.compute_fishers(fisher_model, fisher_loader, device, num_samples=500)
+            del fisher_model
+            torch.cuda.empty_cache()
+        else:
+            current_fishers = fishers
+        
+        if current_fishers is None:
+            raise ValueError("Fishers could not be computed for EATA")
+        eval_model = setup_eata(base_model, current_fishers, lr=mode_config.get('lr'),
+                                e_margin_factor=mode_config.get('e_margin_factor'))
+    elif mode_name == 'sar':
+        eval_model = setup_sar(base_model)
+    else:
+        logger.warning(f"Unknown mode: {mode_name}")
+        return base_model, None
+    return base_model, eval_model
+
+
 def evaluate_single_combination(model_path, corruption_type, severity, data_dir, 
                               clean_data_dir, on_the_fly, mode_name, mode_config, 
                               device, batch_size, fishers=None, proto_evaluator=None,
                               compute_proto_metrics=False, track_efficiency=False,
-                              seed=0):
+                              seed=0, order_seed=None):
     """Evaluate a single mode on a single corruption-severity combination.
-    
+
     Args:
-        mode_name: Name of the mode (e.g., 'normal', 'tent', 'proto_imp_conf_v1')
+        order_seed: None keeps the default (class-sorted) stream order; otherwise the
+            corruption's images arrive in a fixed seeded permutation.
+        mode_name: Name of the mode (e.g., 'normal', 'tent', 'proto_imp_conf_v3')
         mode_config: Dict with setup parameters for this mode
         proto_evaluator: PrototypeMetricsEvaluator instance (optional)
         compute_proto_metrics: Whether to compute prototype metrics (PAC, PCA, sparsity)
@@ -520,9 +602,12 @@ def evaluate_single_combination(model_path, corruption_type, severity, data_dir,
     try:
         # Load data
         if on_the_fly:
+            if order_seed is not None:
+                raise ValueError("--stream-order shuffled is not supported with --on_the_fly")
             loader = load_dataset_with_corruption(clean_data_dir, corruption_type, severity, batch_size)
         else:
-            loader = load_corrupted_dataset(data_dir, corruption_type, severity, batch_size)
+            loader = load_corrupted_dataset(data_dir, corruption_type, severity, batch_size,
+                                            order_seed=order_seed)
         if compute_proto_metrics and proto_evaluator is not None:
             clean_ids = getattr(proto_evaluator, 'clean_sample_ids', None)
             corrupt_ids = _loader_sample_ids(loader)
@@ -543,77 +628,9 @@ def evaluate_single_combination(model_path, corruption_type, severity, data_dir,
         return None
     
     try:
-        # Load fresh model
-        base_model = torch.load(model_path, weights_only=False)
-        base_model = base_model.to(device)
-        base_model.eval()
-
-        # Setup adaptation based on mode
-        if mode_name == 'normal':
-            eval_model = base_model
-        elif mode_name == 'tent':
-            eval_model = setup_tent(base_model)
-        elif mode_name == 'cotta':
-            eval_model = setup_cotta(base_model, mode_config)
-        elif mode_name.startswith('proto_imp_conf'):
-            # ProtoEntropy with canonical or explicitly ablated weighting.
-            eval_model = setup_proto_entropy(
-                base_model,
-                use_importance=mode_config.get('use_importance', True),
-                use_confidence=mode_config.get('use_confidence', True),
-                reset_mode=mode_config.get('reset_mode', None),
-                reset_frequency=mode_config.get('reset_frequency', 10),
-                confidence_threshold=mode_config.get('confidence_threshold', 0.7),
-                ema_alpha=mode_config.get('ema_alpha', 0.999),
-                use_geometric_filter=mode_config.get('use_geometric_filter', False),
-                geo_filter_threshold=mode_config.get('geo_filter_threshold', 0.3),
-                consensus_strategy=mode_config.get('consensus_strategy', 'max'),
-                consensus_ratio=mode_config.get('consensus_ratio', 0.5),
-                adaptation_mode=mode_config.get('adaptation_mode', 'layernorm_only'),
-                use_ensemble_entropy=mode_config.get('use_ensemble_entropy', False),
-                source_proto_stats=mode_config.get('source_proto_stats', None),
-                alpha_source_kl=mode_config.get('alpha_source_kl', 0.0),
-                adapt_all_prototypes=mode_config.get('adapt_all_prototypes', False),
-                logit_weight=mode_config.get('logit_weight', 0.0),
-                shared_confidence_weighting=mode_config.get('shared_confidence_weighting', False),
-                gradient_normalize=mode_config.get('gradient_normalize', False),
-                adaptive_lambda=mode_config.get('adaptive_lambda', False),
-                adaptive_lambda_strategy=mode_config.get('adaptive_lambda_strategy', 'relative_reliability'),
-                adaptive_delta0=mode_config.get('adaptive_delta0', 0.25),
-                adaptive_topk=mode_config.get('adaptive_topk', 3),
-                router_min_consistency=mode_config.get('router_min_consistency', 0.25),
-                lambda_ema_momentum=mode_config.get('lambda_ema_momentum', 0.9),
-                lambda_min=mode_config.get('lambda_min', 0.05),
-                lambda_max=mode_config.get('lambda_max', 0.95),
-                record_diagnostics=mode_config.get('record_diagnostics', False),
-                samplewise_lambda=mode_config.get('samplewise_lambda', False),
-                optimizer_lr=mode_config.get('optimizer_lr', None),
-            )
-            
-            # Reset geo filter stats if applicable
-            if mode_config.get('use_geometric_filter', False) and hasattr(eval_model, 'reset_geo_filter_stats'):
-                eval_model.reset_geo_filter_stats()
-        elif mode_name == 'loss':
-            eval_model = setup_loss_adapt(base_model)
-        elif mode_name == 'eata':
-            if fishers is None:
-                # Compute Fishers on test data (source-free)
-                fisher_model = torch.load(model_path, weights_only=False)
-                fisher_model = fisher_model.to(device)
-                fisher_model = eata_adapt.configure_model(fisher_model)
-                current_fishers = eata_adapt.compute_fishers(fisher_model, loader, device, num_samples=500)
-                del fisher_model
-                torch.cuda.empty_cache()
-            else:
-                current_fishers = fishers
-            
-            if current_fishers is None:
-                raise ValueError("Fishers could not be computed for EATA")
-            eval_model = setup_eata(base_model, current_fishers)
-        elif mode_name == 'sar':
-            eval_model = setup_sar(base_model)
-        else:
-            logger.warning(f"Unknown mode: {mode_name}")
+        base_model, eval_model = build_eval_model(model_path, mode_name, mode_config, device,
+                                                  fishers, loader)
+        if eval_model is None:
             return None
         
         # Track adapted parameters if efficiency tracking is enabled
@@ -721,6 +738,73 @@ def evaluate_single_combination(model_path, corruption_type, severity, data_dir,
         torch.cuda.empty_cache()
 
 
+def evaluate_stream(model_path, stream, corruption_order, severity, data_dir, mode_name,
+                    mode_config, device, batch_size, fishers=None, seed=0):
+    """Adapt ONE model, never reset, over a multi-domain stream (Appendix M).
+
+    mixed: all domains pooled into one stream in a seeded shuffled order.
+    EATA without precomputed fishers takes them from the first ~500 samples of the stream.
+    Returns ({domain: {'accuracy', 'n', 'stream_position'}}, summary). Errors propagate.
+    """
+    seed_everything(seed)
+    if stream == 'mixed':
+        transform = transforms.Compose([
+            transforms.Resize(size=(img_size, img_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std)
+        ])
+        parts = []
+        for c in corruption_order:
+            path = Path(data_dir) / c / str(severity)
+            if not path.exists():
+                raise FileNotFoundError(f"Corrupted dataset not found at {path}")
+            parts.append(datasets.ImageFolder(path, transform))
+        if any(p.classes != parts[0].classes for p in parts):
+            raise ValueError("mixed stream: domains have different class folders")
+        pooled = torch.utils.data.ConcatDataset(parts)
+        domain_of = np.repeat(np.arange(len(parts)), [len(p) for p in parts])
+        order = stream_permutation(len(pooled), seed, 'mixed:' + ','.join(corruption_order))
+        loader = torch.utils.data.DataLoader(
+            pooled, batch_size=batch_size, sampler=FixedOrderSampler(order),
+            num_workers=8, pin_memory=False)
+        fisher_loader = loader
+    else:
+        raise ValueError(f"unknown stream {stream}")
+
+    base_model, eval_model = build_eval_model(model_path, mode_name, mode_config, device,
+                                              fishers, fisher_loader)
+    if eval_model is None:
+        raise ValueError(f"Unknown mode: {mode_name}")
+    try:
+        per_domain = {}
+        flags = []
+        evaluate_model(eval_model, loader, description=f"{mode_name} on mixed stream",
+                       verbose=False, correct_out=flags)
+        correct = torch.cat(flags).numpy()
+        stream_domain = domain_of[np.asarray(order)]
+        if correct.shape[0] != stream_domain.shape[0]:
+            raise RuntimeError("mixed stream: prediction count != stream length")
+        for i, c in enumerate(corruption_order):
+            mask = stream_domain == i
+            per_domain[c] = {'accuracy': float(correct[mask].mean()), 'n': int(mask.sum()),
+                             'stream_position': None}
+        n_total = sum(v['n'] for v in per_domain.values())
+        summary = {
+            'stream': stream,
+            'corruption_order': list(corruption_order),
+            'n_total': n_total,
+            'accuracy_sample_weighted': sum(v['accuracy'] * v['n'] for v in per_domain.values()) / n_total,
+        }
+        stats_owner = eval_model if hasattr(eval_model, 'adaptation_stats') else getattr(eval_model, 'model', None)
+        if stats_owner is not None and hasattr(stats_owner, 'adaptation_stats'):
+            summary['adaptation_stats'] = stats_owner.adaptation_stats.copy()
+        return per_domain, summary
+    finally:
+        del eval_model
+        del base_model
+        torch.cuda.empty_cache()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Comprehensive robustness evaluation on CUB-200-C (Severity 5)',
@@ -744,17 +828,6 @@ def main():
     parser.add_argument('--batch_size', type=int, default=None,
                        help=f'Batch size for evaluation (default: {test_batch_size} from settings)')
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--cotta-lr', type=float, default=None)
-    parser.add_argument('--cotta-momentum', type=float, default=0.999)
-    parser.add_argument('--cotta-restore', type=float, default=0.001)
-    parser.add_argument('--cotta-threshold', type=float, default=0.1)
-    parser.add_argument('--cotta-augmentations', type=int, default=32)
-    parser.add_argument('--cotta-steps', type=int, default=1)
-    parser.add_argument('--cotta-parameters', default='layernorm_attn_bias',
-                        choices=['layernorm_attn_bias', 'reference_weights', 'all_parameters'])
-    parser.add_argument('--cotta-teacher-train', action='store_true')
-    parser.add_argument('--cotta-student-mode', choices=['train', 'eval'], default='eval')
-    parser.add_argument('--cotta-diagnostics', action='store_true')
     
     # Output
     parser.add_argument('--output', type=str, default='./robustness_results_sev5.json',
@@ -780,28 +853,31 @@ def main():
     parser.add_argument('--use-enhanced-metrics', action='store_true', default=False,
                        help='Use enhanced prototype metrics (PCA-Weighted, Calibration, GT Class Contribution).')
     parser.add_argument('--modes', nargs='+', default=None,
-                       help='Subset of modes to run. Choices: normal tent loss eata sar cotta '
-                            'proto_imp_conf_v1 proto_imp_conf_v2 proto_imp_conf_v3. '
+                       help='Subset of modes to run. Choices: normal tent eata sar '
+                            'proto_imp_conf_v3 (fixed lambda) '
+                            'proto_imp_conf_adaptive_source_free_router_coverage_absolute (adaptive router) '
+                            'proto_imp_conf_adaptive_samplewise '
+                            'proto_imp_conf_adaptive_source_free_router_absolute. '
                             'Default: all modes.')
     parser.add_argument('--corruptions', nargs='+', default=['all'],
                         help='"all" or a subset of CUB-C corruption names')
     parser.add_argument('--proto-lambda', type=float, default=1.0,
-                       help='Unified ProtoTTA interpolation λ ∈ [0,1]: '
-                            '1.0 = pure prototype entropy (ProtoTTA), '
-                            '0.0 = pure logit entropy (Tent-style), '
-                            '0.7 = ProtoTTA+ default. '
+                       help='Fixed interpolation λ ∈ [0,1] of proto_imp_conf_v3: '
+                            '1.0 = prototype entropy only, '
+                            '0.0 = output entropy only. '
                             'Loss = λ*proto_loss + (1-λ)*logit_entropy. (default: 1.0)')
     parser.add_argument('--proto-shared-confidence-weighting', action='store_true',
                         help='Apply the same confidence weight to both component losses')
     parser.add_argument('--proto-gradient-normalize', action='store_true',
                         help='Normalize component losses by their gradient norms')
     parser.add_argument('--proto-lambda-ema-momentum', type=float, default=0.9)
+    # The default is recorded in the configuration of the fixed-lambda mode, where it is unused;
+    # proto_imp_conf_adaptive_samplewise requires one of the listed strategies.
     parser.add_argument('--proto-adaptive-strategy', default='relative_reliability',
-                       choices=['relative_reliability', 'activation_margin',
-                                'relative_evidence', 'gradient_consistency',
-                                'source_free_router',
+                       choices=['activation_margin',
+                                'relative_evidence',
+                                'mean_act_rel',
                                 'source_free_router_absolute',
-                                'source_free_router_coverage',
                                 'source_free_router_coverage_absolute'])
     parser.add_argument('--proto-adaptive-delta0', type=float, default=0.25)
     parser.add_argument('--proto-adaptive-topk', type=int, default=3)
@@ -827,8 +903,53 @@ def main():
                         help='Use uniform rather than classifier-importance prototype weights')
     parser.add_argument('--proto-disable-confidence-weighting', action='store_true',
                         help='Disable sample-confidence weighting in both loss components')
+    # Reliability-filter and controller ablations (Table 3). Defaults leave the main
+    # configuration unchanged.
+    parser.add_argument('--proto-reliability-filter', default=None,
+                        choices=['geometric', 'entropy', 'none'],
+                        help="Reliability filter: 'geometric' (default), 'entropy' "
+                             "(EATA rule H(p) < factor*ln C), 'none'")
+    parser.add_argument('--proto-entropy-filter-factor', type=float, default=0.4,
+                        help='EATA margin factor for --proto-reliability-filter entropy')
+    parser.add_argument('--proto-gradient-normalize-override', default=None,
+                        choices=['on', 'off'],
+                        help='Force gradient normalization on/off for the selected ProtoTTA modes '
+                             '(router modes otherwise always normalize)')
+    # Hyperparameter re-selection grid (Appendix M). Defaults (None) keep the main configuration.
+    parser.add_argument('--proto-geo-filter-threshold', type=float, default=None,
+                        help='Override the geometric reliability threshold (default: 0.92)')
+    parser.add_argument('--baseline-lr', type=float, default=None,
+                        help='Tent/EATA Adam learning rate (default: cfg.OPTIM.LR = 1e-3)')
+    parser.add_argument('--eata-e-margin-factor', type=float, default=None,
+                        help='EATA E0 = factor * ln(C) (default: class default ln(1000)/2 - 1)')
+    # Stream protocols (Appendix M). Defaults keep the main protocol.
+    parser.add_argument('--stream', default='reset', choices=['reset', 'mixed'],
+                        help="reset: source model restored for every corruption (default); "
+                             "mixed: all --corruptions pooled into one shuffled stream without reset")
+    parser.add_argument('--stream-order', default='class', choices=['class', 'shuffled'],
+                        help="class: ImageFolder order, i.e. sorted by class (default); "
+                             "shuffled: fixed permutation seeded by --seed, same for every method")
 
     args = parser.parse_args()
+    if args.stream != 'reset':
+        if args.stream_order != 'shuffled':
+            parser.error('--stream mixed requires --stream-order shuffled')
+        if 'all' in args.corruptions or len(args.corruptions) < 2:
+            parser.error('--stream mixed requires an explicit ordered --corruptions list')
+        if args.on_the_fly or args.prototype_metrics or args.track_efficiency or args.use_clean_fisher:
+            parser.error('--stream mixed supports neither --on_the_fly, '
+                         '--prototype-metrics, --track-efficiency nor --use_clean_fisher')
+    if args.stream_order == 'shuffled' and args.prototype_metrics:
+        parser.error('--stream-order shuffled is not supported with --prototype-metrics '
+                     '(clean/corrupted pairing assumes the published order)')
+    if args.proto_reliability_filter is not None and args.proto_disable_geometric_filter:
+        parser.error('Use either --proto-reliability-filter or --proto-disable-geometric-filter')
+    if (args.proto_adaptive_strategy == 'relative_reliability'
+            and (args.modes is None or 'proto_imp_conf_adaptive_samplewise' in args.modes)):
+        parser.error('proto_imp_conf_adaptive_samplewise requires --proto-adaptive-strategy '
+                     '(activation_margin, relative_evidence or mean_act_rel)')
+    if args.proto_reliability_filter is None:
+        args.proto_reliability_filter = 'none' if args.proto_disable_geometric_filter else 'geometric'
     if not 0.0 <= args.proto_lambda <= 1.0:
         parser.error('--proto-lambda must be between 0 and 1')
     if not 0.0 <= args.proto_lambda_min <= args.proto_lambda_max <= 1.0:
@@ -866,16 +987,21 @@ def main():
         unknown_corruptions = [name for name in args.corruptions if name not in corruption_types]
         if unknown_corruptions:
             parser.error(f'Unknown corruptions: {unknown_corruptions}')
+        if len(set(args.corruptions)) != len(args.corruptions):
+            parser.error('Duplicate entries in --corruptions')
         corruption_types = list(args.corruptions)
+    order_seed = args.seed if args.stream_order == 'shuffled' else None
     severity = 5
     severity_key = str(severity)
     
     # Define modes with their configurations
-    # proto_imp_conf has 3 variations
     _logit_w = 1.0 - args.proto_lambda
     proto_common = {
-        'use_geometric_filter': not args.proto_disable_geometric_filter,
-        'geo_filter_threshold': 0.92,
+        'use_geometric_filter': args.proto_reliability_filter == 'geometric',
+        'entropy_filter_factor': (args.proto_entropy_filter_factor
+                                  if args.proto_reliability_filter == 'entropy' else None),
+        'geo_filter_threshold': (0.92 if args.proto_geo_filter_threshold is None
+                                 else args.proto_geo_filter_threshold),
         'consensus_strategy': args.proto_consensus_strategy,
         'adaptation_mode': args.proto_adaptation_mode,
         'use_ensemble_entropy': False,
@@ -901,84 +1027,18 @@ def main():
     }
     modes = {
         'normal': {},
-        'tent': {},
-        'cotta': {
-            'lr': cfg.OPTIM.LR if args.cotta_lr is None else args.cotta_lr,
-            'steps': args.cotta_steps,
-            'adaptation_mode': args.cotta_parameters,
-            'mt_alpha': args.cotta_momentum,
-            'rst_m': args.cotta_restore,
-            'ap': args.cotta_threshold,
-            'n_augmentations': args.cotta_augmentations,
-            'teacher_train': args.cotta_teacher_train,
-            'model_mode': args.cotta_student_mode,
-            'record_diagnostics': args.cotta_diagnostics,
-            'episodic': False,
-        },
-        'proto_imp_conf_v1': {  # Full config
-            'use_geometric_filter': True,
-            'geo_filter_threshold': 0.92,
-            'consensus_strategy': 'top_k_mean',
-            'adaptation_mode': 'layernorm_attn_bias',
-            'use_ensemble_entropy': True,
-            'reset_mode': None,
-            'reset_frequency': 10,
-            'confidence_threshold': 0.7,
-            'ema_alpha': 0.999,
-            'consensus_ratio': 0.5,
-            'logit_weight': _logit_w,
-        },
-        'proto_imp_conf_v2': {  # Without layernorm_attn_bias (default layernorm_only)
-            'use_geometric_filter': True,
-            'geo_filter_threshold': 0.92,
-            'consensus_strategy': 'top_k_mean',
-            'adaptation_mode': 'layernorm_only',  # Default
-            'use_ensemble_entropy': True,
-            'reset_mode': None,
-            'reset_frequency': 10,
-            'confidence_threshold': 0.7,
-            'ema_alpha': 0.999,
-            'consensus_ratio': 0.5,
-            'logit_weight': _logit_w,
-        },
-        'proto_imp_conf_v3': {  # Without use_ensemble_entropy
+        'tent': {'lr': args.baseline_lr},
+        'proto_imp_conf_v3': {  # Fixed lambda (--proto-lambda)
             **proto_common,
             'logit_weight': _logit_w,
         },
-        'proto_imp_conf_adaptive': {
-            **proto_common,
-            'logit_weight': 0.5,
-            'adaptive_lambda': True,
-        },
-        'proto_imp_conf_adaptive_samplewise': {
+        'proto_imp_conf_adaptive_samplewise': {  # Single estimate (--proto-adaptive-strategy)
             **proto_common,
             'logit_weight': 0.5,
             'adaptive_lambda': True,
             'samplewise_lambda': True,
         },
-        'proto_imp_conf_adaptive_relative_evidence': {
-            **proto_common,
-            'logit_weight': 0.5,
-            'adaptive_lambda': True,
-            'adaptive_lambda_strategy': 'relative_evidence',
-            'samplewise_lambda': True,
-        },
-        'proto_imp_conf_adaptive_gradient_consistency': {
-            **proto_common,
-            'logit_weight': 0.5,
-            'adaptive_lambda': True,
-            'adaptive_lambda_strategy': 'gradient_consistency',
-            'gradient_normalize': True,
-        },
-        'proto_imp_conf_adaptive_source_free_router': {
-            **proto_common,
-            'logit_weight': 0.5,
-            'adaptive_lambda': True,
-            'adaptive_lambda_strategy': 'source_free_router',
-            'samplewise_lambda': True,
-            'gradient_normalize': True,
-        },
-        'proto_imp_conf_adaptive_source_free_router_absolute': {
+        'proto_imp_conf_adaptive_source_free_router_absolute': {  # Router without coverage guard
             **proto_common,
             'logit_weight': 0.5,
             'adaptive_lambda': True,
@@ -986,15 +1046,7 @@ def main():
             'samplewise_lambda': True,
             'gradient_normalize': True,
         },
-        'proto_imp_conf_adaptive_source_free_router_coverage': {
-            **proto_common,
-            'logit_weight': 0.5,
-            'adaptive_lambda': True,
-            'adaptive_lambda_strategy': 'source_free_router_coverage',
-            'samplewise_lambda': True,
-            'gradient_normalize': True,
-        },
-        'proto_imp_conf_adaptive_source_free_router_coverage_absolute': {
+        'proto_imp_conf_adaptive_source_free_router_coverage_absolute': {  # Adaptive ProtoTTA
             **proto_common,
             'logit_weight': 0.5,
             'adaptive_lambda': True,
@@ -1002,8 +1054,7 @@ def main():
             'samplewise_lambda': True,
             'gradient_normalize': True,
         },
-        'loss': {},
-        'eata': {},
+        'eata': {'lr': args.baseline_lr, 'e_margin_factor': args.eata_e_margin_factor},
         'sar': {},
     }
 
@@ -1013,6 +1064,12 @@ def main():
         if unknown:
             raise ValueError(f"Unknown modes: {unknown}. Valid: {list(modes.keys())}")
         modes = {m: modes[m] for m in args.modes}
+    if args.proto_gradient_normalize_override is not None:
+        for name in modes:
+            if not name.startswith('proto_imp_conf'):
+                continue
+            modes[name] = {**modes[name],
+                           'gradient_normalize': args.proto_gradient_normalize_override == 'on'}
 
     # Compute Fishers GLOBAL if requested (Clean Data Access)
     fishers = None
@@ -1136,9 +1193,55 @@ def main():
     print(f"Severity:        {severity}")
     print(f"Modes:           {', '.join(modes.keys())}")
     print(f"Batch size:      {batch_size}")
+    print(f"Stream:          {args.stream} (order: {args.stream_order}, order seed: {order_seed})")
     print(f"Output file:     {args.output}")
     print("="*80)
-    
+
+    def run_metadata(stream_summaries=None):
+        meta = {
+            'model_path': args.model,
+            'data_dir': args.data_dir,
+            'clean_data_dir': clean_data_dir,
+            'on_the_fly': args.on_the_fly,
+            'batch_size': batch_size,
+            'severity': severity,
+            'corruption_types': corruption_types,
+            'modes': list(modes.keys()),
+            'mode_configs': modes,
+            'prototype_metrics_enabled': args.prototype_metrics,
+            'proto_baseline_samples': args.proto_baseline_samples if args.prototype_metrics else None,
+            'stream': args.stream,
+            'stream_order': args.stream_order,
+            'order_seed': order_seed,
+        }
+        if stream_summaries is not None:
+            meta['stream_summaries'] = stream_summaries
+        return meta
+
+    if args.stream != 'reset':
+        # One adapted model per mode over the whole stream (no reset between corruptions).
+        start_time = time.time()
+        stream_summaries = {}
+        for mode_name in modes.keys():
+            if all(results_dict[mode_name][c][severity_key] is not None for c in corruption_types):
+                print(f"{mode_name}: stream already complete")
+                continue
+            per_domain, summary = evaluate_stream(
+                args.model, args.stream, corruption_types, severity, args.data_dir, mode_name,
+                modes[mode_name], device, batch_size, fishers=fishers, seed=args.seed)
+            for c in corruption_types:
+                results_dict[mode_name][c][severity_key] = per_domain[c]
+            stream_summaries[mode_name] = summary
+            save_results_json(args.output, results_dict, run_metadata(stream_summaries))
+            mean_acc = np.mean([per_domain[c]['accuracy'] for c in corruption_types])
+            print(f"{mode_name} [{args.stream}]: mean over domains {mean_acc*100:.2f}%  "
+                  f"(sample-weighted {summary['accuracy_sample_weighted']*100:.2f}%)")
+            for c in corruption_types:
+                print(f"  {c:<22s} {per_domain[c]['accuracy']*100:6.2f}%  n={per_domain[c]['n']}")
+        print(f"Total time: {(time.time() - start_time)/60:.1f} minutes")
+        print(f"Results saved to: {args.output}")
+        return
+
     # Create list of all combinations to evaluate
     all_combinations = []
     for mode_name in modes.keys():
@@ -1179,27 +1282,15 @@ def main():
             compute_proto_metrics=args.prototype_metrics,
             track_efficiency=args.track_efficiency,
             seed=args.seed,
+            order_seed=order_seed,
         )
-        
+
         # Update results
         results_dict[mode_name][corruption_type][severity_key] = result
-        
+
         # Save after each combination (iterative saving)
         try:
-            metadata = {
-                'model_path': args.model,
-                'data_dir': args.data_dir,
-                'clean_data_dir': clean_data_dir,
-                'on_the_fly': args.on_the_fly,
-                'batch_size': batch_size,
-                'severity': severity,
-                'corruption_types': corruption_types,
-                'modes': list(modes.keys()),
-                'mode_configs': modes,
-                'prototype_metrics_enabled': args.prototype_metrics,
-                'proto_baseline_samples': args.proto_baseline_samples if args.prototype_metrics else None
-            }
-            save_results_json(args.output, results_dict, metadata)
+            save_results_json(args.output, results_dict, run_metadata())
             
             # Update progress bar with accuracy
             if result is not None:

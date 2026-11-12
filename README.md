@@ -1,217 +1,76 @@
-# ProtoTTA: Anonymous Reproducibility Package
+# ProtoTTA: Anonymous Code Artifact
 
-This repository is the anonymized code artifact for a double-blind paper
-submission. It contains the implementation needed to reproduce
-prototype-guided test-time adaptation experiments across image, pathology,
-and text prototype models. Author names, affiliations, contact details,
-publication links, paper drafts, generated results, and machine-specific
-cluster launchers are intentionally omitted.
+This repository contains the code for the double-blind submission *ProtoTTA: Explainable Test-Time
+Adaptation via Prototype Guidance*. It reproduces the results reported in the paper on four prototype
+backbones (ProtoViT on CUB-200-C, ProtoPNet on SICAPv2-C, ProtoPFormer on Stanford Dogs-C, and ProtoLens
+on Amazon-C) and the explanation evaluations (part annotations, blinded human and VLM comparisons,
+narrator validation). Datasets, checkpoints, and generated results are not included.
 
-## Method overview
+Adaptation never uses target labels. Ground-truth labels were used to select hyperparameters
+(Appendices L and M); otherwise they are used, together with clean counterparts and part annotations,
+only by offline evaluation scripts.
 
-ProtoTTA adapts a pretrained prototype model at inference time using the
-model's intermediate prototype evidence. The implementation provides:
+## Layout
 
-- prototype-level binary entropy minimization;
-- geometric filtering of unreliable samples;
-- prototype-importance and prediction-confidence weighting;
-- adaptive routing between prototype and output entropy;
-- component-wise gradient normalization and stability guards;
-- PAC, PCA-W, calibration, sparsity, selection-rate, and efficiency metrics;
-- label-blind VLM export, scoring, and analysis utilities.
+| Path | Contents |
+|---|---|
+| `ProtoViT/` | ProtoViT / CUB-200-C: ProtoTTA, baselines, metrics, VLM scoring and narration, judge intervention |
+| `ProtoViT/explanation_eval/` | Part annotations and clean-reference measures, human study and blinded VLM comparison, narrator validation, PCA-W–VLM correlation |
+| `ProtoPFormer/` | ProtoPFormer / Stanford Dogs-C |
+| `ProtoPNetVLM/protopnet_tta/` | ProtoPNet / SICAPv2-C |
+| `ProtoLens/` | ProtoLens / Amazon-C (shared-prototype extension) |
+| `experiments/` | Command generators and analyses for the controller ablation, hyperparameter re-selection, timing, and calibrate-once mode |
+| `ProtoTTA/` | Model-agnostic ProtoTTA implementation and integration guide, with unit tests |
+| `protovit_env.yml`, `vlm_environment.yml`, `flsh_att_environment.yml` | Conda environments (main vision stack; VLM judges and narrators; optional Flash Attention) |
 
-The adaptation code does not use target labels. Clean labels or paired clean
-samples are used only by optional offline evaluation metrics.
-
-## Repository layout
-
-```text
-ProtoTTA/                         Generic integration and metric guides
-ProtoViT/                         CUB-200-C implementation and VLM analysis
-ProtoPFormer/                     Stanford Dogs-C implementation
-ProtoLens/                        Amazon-C text implementation
-ProtoPNetVLM/protopnet_tta/       SICAPv2-C and label-blind VLM pipeline
-protopnet/                        Standalone ProtoPNet adaptation modules
-protovit_env.yml                  Main vision environment
-vlm_environment.yml               VLM analysis environment
-flsh_att_environment.yml          Optional Flash Attention environment
-```
-
-Start with [`ProtoTTA/README.md`](ProtoTTA/README.md) for the model-agnostic
-interface and [`ProtoTTA/EXISTING_BACKBONES.md`](ProtoTTA/EXISTING_BACKBONES.md)
-for backbone-specific entry points.
+Each directory has a README with the exact command for every result it covers. The main-result commands
+use the configuration of Appendix L (for example, λ in [0, 1] and a shared confidence weight for both
+loss terms); ablation commands change only the component under study. Seeds are 0, 2, and 3 unless
+stated otherwise. Paths to data, checkpoints, and outputs are command-line arguments or, where a README
+says so, relative to the backbone directory.
 
 ## Installation
 
-The main vision stack can be created with:
-
 ```bash
-conda env create -f protovit_env.yml
-conda activate protovit
+conda env create -f protovit_env.yml        # adaptation, metrics, analyses
+conda env create -f vlm_environment.yml     # VLM judges, narrators, judge intervention
 ```
 
-For VLM scoring, use the isolated environment:
-
-```bash
-conda env create -f vlm_environment.yml
-conda activate echofar
-```
-
-Backbones have different upstream dependencies. The ProtoPNet pipeline also
-expects the upstream `proto_baseline` package on `PYTHONPATH`; see
-[`ProtoPNetVLM/protopnet_tta/README.md`](ProtoPNetVLM/protopnet_tta/README.md).
-No dataset or checkpoint is downloaded implicitly.
+The ProtoPNet code additionally needs the upstream ProtoPNet model package (`proto_baseline`) on
+`PYTHONPATH`; see `ProtoPNetVLM/protopnet_tta/README.md`.
 
 ## Data and checkpoints
 
-Download the public source datasets from their official providers and arrange
-them in ImageFolder-compatible layouts where applicable:
+Download CUB-200-2011, Stanford Dogs, SICAPv2, and the review data from their official providers. The
+corruption benchmarks are generated with the included scripts (Appendix A):
+`ProtoViT/create_cub_c.py`, `ProtoPFormer/create_dogs_c.py`, `ProtoPNetVLM/protopnet_tta/create_sicap_c.py`,
+and `ProtoLens/generate_amazon_c.py`. Each backbone README describes how its source model is trained or
+obtained.
 
-- CUB-200-2011 for ProtoViT;
-- Stanford Dogs for ProtoPFormer;
-- SICAPv2 for ProtoPNet;
-- Yelp/Amazon review data for ProtoLens.
+## Where each result is reproduced
 
-Corruption generators are included for CUB-200-C, Dogs-C, SICAPv2-C, and the
-text benchmarks. Dataset, checkpoint, and output paths are command-line
-arguments. Checkpoints are not included because of artifact size and upstream
-distribution constraints.
+| Paper element | Where |
+|---|---|
+| Table 1, Table 2, Tables 6–7 (per-corruption results) | `ProtoViT/README.md`, `ProtoPFormer/README.md`, `ProtoPNetVLM/protopnet_tta/README.md`, `ProtoLens/README.md` |
+| Table 3 (left): objective × reliability filter; adapted parameters | `ProtoViT/README.md`; `experiments/controller_ablation/` |
+| Table 3 (right): controller components on four backbones | backbone READMEs; `experiments/controller_ablation/` (commands and table) |
+| Table 4 and Appendix O: part annotations and closeness to the clean explanation | `ProtoViT/explanation_eval/` |
+| Table 5 and Appendix P: human study, blinded VLM comparison, narrator validation | `ProtoViT/explanation_eval/` |
+| Table 8 (Appendix C): label-free judge intervention | backbone READMEs |
+| Table 9, Figures 2 and 5 (Appendix E.1): VLM scoring and narration | `ProtoViT/README.md` (`vlm_eval.py`) |
+| Appendix E.3: PCA-W and VLM correlation | `ProtoViT/explanation_eval/` |
+| Table 10 (fixed-λ sweep) and Table 11 (design ablations) | backbone READMEs (Table 11: `ProtoViT/README.md`) |
+| Figures 3 and 6–8 (Appendices J and K) | `ProtoViT/README.md` |
+| Table 12 (Appendix M): hyperparameter re-selection | `experiments/hyperparameter_selection/` |
+| Table 13 and per-image overhead (Appendix N) | `experiments/timing/`, `experiments/calibrate_once/` |
 
-## Main evaluation commands
-
-The commands below show the adaptive configuration and expose every path that
-must be supplied locally. Output filenames are illustrative and may be changed.
-
-### ProtoViT / CUB-200-C
-
-```bash
-cd ProtoViT
-python evaluate_robustness.py \
-  --model /path/to/protovit_checkpoint.pth \
-  --data_dir /path/to/cub200_c \
-  --clean_data_dir /path/to/cub200_clean_test \
-  --output /path/to/results/protovit.json \
-  --modes normal tent eata sar \
-          proto_imp_conf_adaptive_source_free_router_coverage_absolute \
-  --corruptions all \
-  --prototype-metrics \
-  --use-enhanced-metrics \
-  --track-efficiency \
-  --proto-gradient-normalize \
-  --proto-adaptive-delta0 0.25 \
-  --proto-adaptive-topk 3
-```
-
-### ProtoPFormer / Stanford Dogs-C
+## Tests
 
 ```bash
-cd ProtoPFormer
-python evaluate_robustness_dogs.py \
-  --model /path/to/protopformer_checkpoint.pth \
-  --data_dir /path/to/stanford_dogs_c \
-  --clean_dir /path/to/stanford_dogs_clean \
-  --output /path/to/results/protopformer.json \
-  --modes normal tent eata sar \
-          proto_tta_adaptive_source_free_router_coverage_absolute \
-  --corruptions all \
-  --prototype-metrics \
-  --use-enhanced-metrics \
-  --track-efficiency \
-  --proto_gradient_normalize \
-  --proto_adaptive_delta0 0.25 \
-  --proto_adaptive_topk 3
+python -m unittest -v ProtoTTA.tests.test_adapter
+python -m compileall -q ProtoTTA ProtoViT ProtoPFormer ProtoPNetVLM ProtoLens experiments
 ```
-
-### ProtoLens / Amazon-C
-
-```bash
-cd ProtoLens
-python evaluate_robustness_amazonc.py \
-  --model_path /path/to/protolens_checkpoint.pth \
-  --data_dir /path/to/Amazon-C \
-  --output /path/to/results/protolens.json \
-  --methods baseline tent eata sar prototta \
-  --proto_adaptive_lambda \
-  --proto_gradient_normalize \
-  --proto_adaptive_strategy source_free_router_coverage_absolute \
-  --proto_adaptive_delta0 0.25 \
-  --proto_adaptive_topk 3 \
-  --force
-```
-
-### ProtoPNet / SICAPv2-C
-
-```bash
-python -m ProtoPNetVLM.protopnet_tta.evaluate_robustness \
-  --model /path/to/protopnet_checkpoint.pth \
-  --data_dir /path/to/SICAPv2-C \
-  --clean_data_dir /path/to/SICAPv2/test \
-  --output /path/to/results/protopnet.json \
-  --severity 5 \
-  --batch_size 64 \
-  --modes Normal Tent EATA SAR MEMO \
-          ProtoAbsoluteConsistencyCoverageRouter \
-  --prototype-metrics \
-  --track-efficiency
-```
-
-## Label-free ProtoLens supervisor
-
-The text pipeline exports BEFORE/AFTER predictions and prototype evidence,
-scores disagreements without exposing target labels, and opens sealed targets
-only during final analysis:
-
-```bash
-cd ProtoLens
-python protolens_llm_export.py --task-id 0 \
-  --data-dir /path/to/Amazon-C \
-  --model-path /path/to/protolens_checkpoint.pth \
-  --output-dir /path/to/llm_run
-python protolens_llm_score.py --task-id 0 \
-  --output-dir /path/to/llm_run
-python protolens_llm_analyze.py --output-dir /path/to/llm_run
-```
-
-Repeat the export and scoring commands for task indices `0` through `19`.
-Generated evidence, scores, and sealed targets remain excluded from version
-control.
-
-## Reproducibility controls
-
-- Each corruption/method run starts from a fresh checkpoint unless the
-  corresponding entry point explicitly documents continuous adaptation.
-- Deterministic backend settings and stable data ordering are used where the
-  underlying libraries support them.
-- Paired clean/corrupted evaluators validate sample count, label order, and
-  sample identity before computing paired metrics.
-- Result files record method configuration, stream order, and available
-  dataset/checkpoint provenance.
-- Existing result files are resumed by default in several evaluators; use the
-  documented overwrite or force flag when a clean rerun is required.
-
-## Verification
-
-Run syntax and focused unit checks from the repository root:
-
-```bash
-python -m compileall -q \
-  ProtoTTA ProtoLens ProtoPFormer ProtoViT \
-  ProtoPNetVLM/protopnet_tta protopnet
-
-cd ProtoViT
-python -m unittest -v \
-  test_failure_detection.py \
-  test_fullset_vlm_gate.py \
-  test_paired_adaptation_supervision.py
-
-cd ../ProtoLens
-python -m unittest -v test_protolens_llm.py
-```
-
-Generated datasets, checkpoints, result files, VLM boards, logs, caches, and
-private target manifests are excluded by `.gitignore`.
 
 ## Double-blind note
 
-Citation and contact information are withheld for review and will be restored
-in the public release after the double-blind process.
+Citation and contact information are withheld for review.

@@ -91,7 +91,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--prototype-evidence",
         type=Path,
-        default=ROOT / "results/vlm_purified/evidence",
+        default=ROOT / "results/prototype_evidence/evidence",
     )
     parser.add_argument(
         "--output-dir",

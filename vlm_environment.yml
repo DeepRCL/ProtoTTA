@@ -1,4 +1,4 @@
-name: echofar
+name: prototta-vlm
 channels:
   - defaults
 dependencies:

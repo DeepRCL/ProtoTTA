@@ -44,7 +44,7 @@ venv.bak/
 logs/
 log_folder/
 
-# SLURM output files
+# Batch job output files
 *.out
 *.err
 

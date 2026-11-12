@@ -1,0 +1,6 @@
+{
+  "name": "blind-reader",
+  "displayName": "Blind reader",
+  "version": "1.0.0",
+  "description": "Main agent limited to read_file, for blinded image-judging runs (no web search, no shell)."
+}

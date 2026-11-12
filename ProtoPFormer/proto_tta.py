@@ -866,7 +866,31 @@ class ProtoTTA(nn.Module):
         router_gate_fraction = None
         if self.adaptive_lambda:
             valid = reliable_mask.bool()
-            if self.adaptive_lambda_strategy == 'activation_margin':
+            if self.adaptive_lambda_strategy == 'mean_act_rel':
+                # Simplest label-free combination: sample-wise average of the
+                # two estimates, with no gradient routing.
+                if self.adaptive_branch_weighting and local_branch_score is not None \
+                        and global_branch_score is not None:
+                    native_score = (
+                        local_branch_weight * local_branch_score
+                        + global_branch_weight * global_branch_score
+                    )
+                else:
+                    native_score = self._prototype_activation_margin(
+                        local_scores, global_scores, pred_class,
+                        local_proto_identities, global_proto_identities,
+                    )
+                relative_score, proto_reliability, output_reliability = \
+                    relative_evidence_lambda(
+                        logits=logits,
+                        branch_scores=(local_scores, global_scores),
+                        branch_proto_identities=(
+                            local_proto_identities, global_proto_identities
+                        ),
+                        topk=self.adaptive_topk,
+                    )
+                adaptive_score = 0.5 * (native_score + relative_score)
+            elif self.adaptive_lambda_strategy == 'activation_margin':
                 if self.adaptive_branch_weighting and local_branch_score is not None \
                         and global_branch_score is not None:
                     adaptive_score = (

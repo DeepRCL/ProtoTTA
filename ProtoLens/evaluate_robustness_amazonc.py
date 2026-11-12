@@ -56,9 +56,6 @@ import proto_tta
 import adapt_utils
 from prototype_metrics import ProtoLensMetricsEvaluator, EfficiencyTracker
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tta_baselines import CoTTA, TokenMaskTransform
-
 def seed_everything(seed):
     """Seed each independent method/corruption evaluation reproducibly."""
     random.seed(seed)
@@ -429,7 +426,7 @@ def create_dataloader(df, tokenizer, max_length, batch_size):
 
 
 # ============================================================================
-# TTA Method Setup Functions (matching run_inference_amazon_c.py)
+# TTA Method Setup Functions
 # ============================================================================
 
 def setup_tent(model, adaptation_mode):
@@ -438,31 +435,6 @@ def setup_tent(model, adaptation_mode):
     print(f"TENT: Adapting {len(params)} parameter groups")
     optimizer = setup_optimizer(params)
     return tent.Tent(model, optimizer, steps=cfg.OPTIM.STEPS, episodic=cfg.MODEL.EPISODIC)
-
-
-def setup_cotta(model, adaptation_mode, tokenizer, config=None):
-    """CoTTA for text, using token masking for the augmentation teacher."""
-    model = adapt_utils.configure_model(model, adaptation_mode)
-    config = config or {}
-    if config.get('complete_optimizer', False):
-        # Include every parameter enabled by configure_model; the legacy
-        # collector recognizes only a subset of attention bias names.
-        params = [p for p in model.parameters() if p.requires_grad]
-    else:
-        params, _ = adapt_utils.collect_params(model, adaptation_mode)
-    params = list({id(p): p for p in params}.values())
-    optimizer = setup_optimizer(params)
-    if 'lr' in config:
-        for group in optimizer.param_groups:
-            group['lr'] = config['lr']
-    return CoTTA(
-        model, optimizer, TokenMaskTransform(tokenizer.mask_token_id, probability=config.get('mask_probability', 0.10)),
-        steps=cfg.OPTIM.STEPS, episodic=cfg.MODEL.EPISODIC,
-        mt_alpha=config.get('mt_alpha', 0.999), rst_m=config.get('rst_m', 0.01),
-        ap=config.get('ap', 0.92), n_augmentations=config.get('n_augmentations', 32),
-        symmetric_loss=config.get('symmetric_loss', False),
-        record_diagnostics=config.get('record_diagnostics', False),
-    )
 
 
 def setup_eata(model, adaptation_mode, e_margin, d_margin):
@@ -483,7 +455,8 @@ def setup_prototta(model, adaptation_mode, use_geo_filter, geo_threshold,
                    router_min_consistency=0.25,
                    lambda_ema_momentum=0.0, lambda_min=0.0,
                    lambda_max=1.0, record_diagnostics=False,
-                   adaptive_lambda_strategy='activation_margin'):
+                   adaptive_lambda_strategy='activation_margin',
+                   fixed_lambda_gradnorm=False):
     model = adapt_utils.configure_model(model, adaptation_mode)
     params, param_names = adapt_utils.collect_params(model, adaptation_mode)
     print(f"ProtoTTA: Adapting {len(params)} parameter groups")
@@ -511,7 +484,8 @@ def setup_prototta(model, adaptation_mode, use_geo_filter, geo_threshold,
                               lambda_min=lambda_min,
                               lambda_max=lambda_max,
                               record_diagnostics=record_diagnostics,
-                              adaptive_lambda_strategy=adaptive_lambda_strategy)
+                              adaptive_lambda_strategy=adaptive_lambda_strategy,
+                              fixed_lambda_gradnorm=fixed_lambda_gradnorm)
 
 
 def setup_sar(model, adaptation_mode):
@@ -844,7 +818,7 @@ def parse_args():
                         help='Random seed for model adaptation and data loading')
     
     parser.add_argument('--methods', type=str, nargs='+',
-                       default=['baseline', 'tent', 'eata', 'sar', 'cotta', 'prototta'],
+                       default=['baseline', 'tent', 'eata', 'sar', 'prototta'],
                        help='Methods to evaluate (additive - only adds missing)')
     parser.add_argument('--corruption_types', type=str, nargs='+', default=None)
     parser.add_argument('--severities', type=int, nargs='+', default=None)
@@ -863,8 +837,8 @@ def parse_args():
     parser.add_argument('--sigmoid_temperature', type=float, default=5.0)
     parser.add_argument('--importance_mode', type=str, default='global')
     parser.add_argument('--proto_lambda', type=float, default=1.0,
-                       help='Unified ProtoTTA λ ∈ [0,1]: 1.0=pure prototype entropy (ProtoTTA), '
-                            '0.0=pure logit entropy, 0.7=ProtoTTA+ default. (default: 1.0)')
+                       help='Fixed prototype weight λ ∈ [0,1]: 1.0 = prototype loss only, '
+                            '0.0 = output entropy only. (default: 1.0)')
     parser.add_argument('--proto_adaptive_lambda', action='store_true',
                        help='Set prototype weight lambda from current test activations')
     parser.add_argument('--proto_samplewise_lambda', action='store_true',
@@ -877,16 +851,17 @@ def parse_args():
                        help='Absolute [0,1] prototype-gradient consistency floor for the absolute router')
     parser.add_argument('--proto_adaptive_strategy', type=str,
                        choices=['activation_margin', 'relative_evidence',
-                                'source_free_router',
+                                'mean_act_rel',
                                 'source_free_router_absolute',
-                                'source_free_router_evidence',
-                                'source_free_router_coverage',
                                 'source_free_router_coverage_absolute'],
                        default='activation_margin')
     parser.add_argument('--proto_lambda_ema_momentum', type=float, default=0.0)
     parser.add_argument('--proto_lambda_min', type=float, default=0.0)
     parser.add_argument('--proto_lambda_max', type=float, default=1.0)
     parser.add_argument('--proto_record_diagnostics', action='store_true')
+    parser.add_argument('--proto_fixed_lambda_gradnorm', action='store_true',
+                        help='Fixed lambda with the gradient normalization of the adaptive '
+                             'objective (use with --proto_gradient_normalize)')
     
     # Prototype metrics
     parser.add_argument('--prototype-metrics', action='store_true', default=True,
@@ -986,18 +961,11 @@ def main():
                                 'adaptive_strategy': args.proto_adaptive_strategy,
                                 'lambda_ema_momentum': args.proto_lambda_ema_momentum,
                                 'lambda_min': args.proto_lambda_min,
-                                'lambda_max': args.proto_lambda_max},
-                    'sar': {'learning_rate': args.learning_rate, 'adaptation_mode': args.adaptation_mode},
-                    'cotta': {
-                        'learning_rate': args.learning_rate,
-                        'adaptation_mode': args.adaptation_mode,
-                        'mt_alpha': 0.999,
-                        'rst_m': 0.01,
-                        'ap': 0.92,
-                        'n_augmentations': 32,
-                        'augmentation': 'token_mask_0.10',
-                        'episodic': False,
-                    }
+                                'lambda_max': args.proto_lambda_max,
+                                **({'fixed_lambda_gradnorm': True}
+                                   if args.proto_fixed_lambda_gradnorm else {}),
+                                'record_diagnostics': args.proto_record_diagnostics},
+                    'sar': {'learning_rate': args.learning_rate, 'adaptation_mode': args.adaptation_mode}
                 }
             },
             'results': {},
@@ -1150,7 +1118,7 @@ def main():
                     result.update(config_metrics_evaluator.compute_gt_class_contribution(adapted_activations, labels_tensor))
 
                 
-            elif method in ['tent', 'eata', 'prototta', 'sar', 'cotta']:
+            elif method in ['tent', 'eata', 'prototta', 'sar']:
                 if method == 'tent':
                     tta_model = setup_tent(model, args.adaptation_mode)
                 elif method == 'eata':
@@ -1169,11 +1137,10 @@ def main():
                                               lambda_min=args.proto_lambda_min,
                                               lambda_max=args.proto_lambda_max,
                                               record_diagnostics=args.proto_record_diagnostics,
-                                              adaptive_lambda_strategy=args.proto_adaptive_strategy)
+                                              adaptive_lambda_strategy=args.proto_adaptive_strategy,
+                                              fixed_lambda_gradnorm=args.proto_fixed_lambda_gradnorm)
                 elif method == 'sar':
                     tta_model = setup_sar(model, args.adaptation_mode)
-                elif method == 'cotta':
-                    tta_model = setup_cotta(model, args.adaptation_mode, tokenizer)
                 
                 result = evaluate_tta_method(
                     tta_model, dataloader, device, method,

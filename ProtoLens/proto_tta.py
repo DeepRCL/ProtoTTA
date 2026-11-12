@@ -2,10 +2,11 @@
 ProtoTTA (Prototype-Aware Test-Time Adaptation) for ProtoLens.
 Adapted from ProtoViT for text classification.
 
-V3 Configuration (Best from experiments):
-- Geometric filtering: threshold=0.5 (adjusted for cosine similarity range [-1, 1])
-- Consensus strategy: top_k_mean (top 50% of prototypes)
-- Adaptation mode: LayerNorm + Attention biases
+Configuration used for the reported Amazon-C results:
+- Reliability filter: mean of the top 25 of the 50 cosine similarities >= 0.1
+  (consensus strategy top_k_mean with ratio 0.5, threshold 0.1)
+- Similarity mapping: sigmoid(5 * clip(similarity, -1, 1))
+- Adaptation mode: LayerNorm affine parameters + attention-projection biases
 - Uses actual prototype similarities (NOT approximated from FC layer)
 
 Key differences from ProtoViT:
@@ -78,9 +79,14 @@ class ProtoTTA(nn.Module):
                  router_min_consistency=0.25,
                  lambda_ema_momentum=0.0, lambda_min=0.0,
                  lambda_max=1.0, record_diagnostics=False,
-                 adaptive_lambda_strategy='activation_margin'):
+                 adaptive_lambda_strategy='activation_margin',
+                 fixed_lambda_gradnorm=False):
         """
         Args:
+            fixed_lambda_gradnorm: with a fixed lambda (no adaptive lambda) and
+                gradient_normalize=True, divide each loss component by its
+                gradient norm, as in the adaptive objective. Default False keeps
+                the fixed-lambda objective without normalization.
             model: ProtoLens model (must return similarity as 4th output)
             optimizer: Optimizer for adaptation
             steps: Number of adaptation steps per batch
@@ -132,6 +138,7 @@ class ProtoTTA(nn.Module):
         self.lambda_max = lambda_max
         self.record_diagnostics = record_diagnostics
         self.adaptive_lambda_strategy = adaptive_lambda_strategy
+        self.fixed_lambda_gradnorm = bool(fixed_lambda_gradnorm)
         
         # Filter mode - 'geometric' or 'none'
         self.filter_mode = 'geometric' if use_geometric_filter else 'none'
@@ -196,6 +203,7 @@ class ProtoTTA(nn.Module):
                 lambda_max=self.lambda_max,
                 record_diagnostics=self.record_diagnostics,
                 adaptive_lambda_strategy=self.adaptive_lambda_strategy,
+                fixed_lambda_gradnorm=self.fixed_lambda_gradnorm,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 special_tokens_mask=special_tokens_mask,
@@ -295,6 +303,7 @@ def forward_and_adapt_proto(model, optimizer, use_geometric_filter, geo_filter_t
                             lambda_min=0.0, lambda_max=1.0,
                             record_diagnostics=False,
                             adaptive_lambda_strategy='activation_margin',
+                            fixed_lambda_gradnorm=False,
                             input_ids=None, attention_mask=None, special_tokens_mask=None,
                             mode="test", original_text=None, current_batch_num=None,
                             adaptation_stats=None, **kwargs):
@@ -577,13 +586,10 @@ def forward_and_adapt_proto(model, optimizer, use_geometric_filter, geo_filter_t
             controller_output_reliability = None
             router_gate_fraction = None
             router_strategies = (
-                'source_free_router',
                 'source_free_router_absolute',
-                'source_free_router_evidence',
-                'source_free_router_coverage',
                 'source_free_router_coverage_absolute',
             )
-            if adaptive_lambda_strategy == 'activation_margin' or \
+            if adaptive_lambda_strategy in ('activation_margin', 'mean_act_rel') or \
                     adaptive_lambda_strategy in router_strategies:
                 # Preserve the original activation-margin controller exactly.
                 if hasattr(model, 'fc') and hasattr(model.fc, 'weight'):
@@ -630,6 +636,21 @@ def forward_and_adapt_proto(model, optimizer, use_geometric_filter, geo_filter_t
                     lambda_min, lambda_max
                 )
                 adaptive_margin = controller_proto_reliability
+            elif adaptive_lambda_strategy == 'mean_act_rel':
+                # Sample-wise average of the two estimates, with no gradient
+                # routing.
+                if not (hasattr(model, 'fc') and hasattr(model.fc, 'weight')):
+                    raise ValueError('mean_act_rel requires model.fc.weight')
+                (relative_lambda,
+                 controller_proto_reliability,
+                 controller_output_reliability) = relative_evidence_lambda(
+                    logits=outputs_filtered,
+                    proto_probs=proto_probs,
+                    classifier_weights=model.fc.weight,
+                    topk=adaptive_topk,
+                )
+                relative_lambda = relative_lambda.clamp(lambda_min, lambda_max)
+                lambda_per_sample = 0.5 * (lambda_per_sample + relative_lambda)
             elif adaptive_lambda_strategy in router_strategies:
                 if not (hasattr(model, 'fc') and hasattr(model.fc, 'weight')):
                     raise ValueError(
@@ -663,18 +684,7 @@ def forward_and_adapt_proto(model, optimizer, use_geometric_filter, geo_filter_t
                         proto_gradient_consistency >= router_min_consistency
                     )
 
-                if adaptive_lambda_strategy == 'source_free_router_evidence':
-                    # A saturated softmax margin is not evidence that output
-                    # entropy is trustworthy.  Override it samplewise when the
-                    # prototype space still separates the predicted class.
-                    guard = (
-                        (relative_output_reliability >= 0.90)
-                        & (relative_proto_reliability >= 0.40)
-                    )
-                    native_gate = guard | bool(gradient_gate.item())
-                elif adaptive_lambda_strategy in (
-                        'source_free_router_coverage',
-                        'source_free_router_coverage_absolute'):
+                if adaptive_lambda_strategy == 'source_free_router_coverage_absolute':
                     # If only a small fraction passes the independent
                     # geometric filter, a saturated output margin is treated
                     # as overconfidence rather than reliability.
@@ -705,7 +715,7 @@ def forward_and_adapt_proto(model, optimizer, use_geometric_filter, geo_filter_t
                 controller_output_reliability = relative_output_reliability
                 router_gate_fraction = native_gate.float().mean().item()
             else:
-                if adaptive_lambda_strategy != 'activation_margin':
+                if adaptive_lambda_strategy not in ('activation_margin', 'mean_act_rel'):
                     raise ValueError(
                         f'Unknown adaptive lambda strategy: {adaptive_lambda_strategy}'
                     )
@@ -775,6 +785,15 @@ def forward_and_adapt_proto(model, optimizer, use_geometric_filter, geo_filter_t
                             ))
                         )
                     )
+        elif fixed_lambda_gradnorm and gradient_normalize:
+            # Fixed λ with the same gradient normalization as the adaptive
+            # objective (opt-in; see fixed_lambda_gradnorm).
+            proto_term = proto_loss / (proto_grad_norm.detach() + 1e-8)
+            if logit_weight > 0:
+                output_term = loss_logit / (output_grad_norm.detach() + 1e-8)
+                loss = (1.0 - logit_weight) * proto_term + logit_weight * output_term
+            else:
+                loss = proto_term
         elif logit_weight > 0:
             # Preserve the existing fixed-λ implementation exactly.
             loss = (1.0 - logit_weight) * proto_loss + logit_weight * loss_logit
