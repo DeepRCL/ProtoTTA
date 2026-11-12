@@ -21,7 +21,6 @@ import hashlib
 import json
 import time
 import math
-import subprocess
 import torch
 import torch.utils.data
 import torch.optim as optim
@@ -92,31 +91,13 @@ def sha256_tensor(value):
     return digest.hexdigest()
 
 
-def git_value(*args):
-    """Best-effort git provenance; evaluation remains usable outside git."""
-    try:
-        return subprocess.check_output(
-            ['git', *args], cwd=Path(__file__).resolve().parent.parent,
-            text=True, stderr=subprocess.DEVNULL
-        ).strip()
-    except (OSError, subprocess.CalledProcessError):
-        return None
-
-
 def evaluator_provenance(model_path):
     evaluator_path = Path(__file__).resolve()
-    diff = git_value('diff', '--', str(evaluator_path.relative_to(
-        evaluator_path.parent.parent)))
     return {
         'model_path': str(Path(model_path).resolve()),
         'model_checksum_sha256': sha256_file(model_path),
-        'git_commit': git_value('rev-parse', 'HEAD'),
         'evaluator_path': str(evaluator_path),
         'evaluator_checksum_sha256': sha256_file(evaluator_path),
-        'evaluator_diff_sha256': hashlib.sha256(
-            (diff or '').encode('utf-8')
-        ).hexdigest(),
-        'git_worktree_dirty': bool(git_value('status', '--porcelain')),
     }
 
 
@@ -1488,12 +1469,10 @@ def main():
                     if clean_identity else None
                 ),
                 'model_checksum_sha256': provenance['model_checksum_sha256'],
-                'git_commit': provenance['git_commit'],
                 'evaluator_path': provenance['evaluator_path'],
                 'evaluator_checksum_sha256': (
                     provenance['evaluator_checksum_sha256']
                 ),
-                'evaluator_diff_sha256': provenance['evaluator_diff_sha256'],
                 'clean_reference_cache': args.clean_reference_cache,
                 'prototype_metrics_enabled': args.prototype_metrics,
                 'proto_baseline_samples': None,
