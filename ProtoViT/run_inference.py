@@ -1121,7 +1121,7 @@ if __name__ == '__main__':
     parser.add_argument('-gpuid', type=str, default='0', help='GPU ID to use')
     parser.add_argument('-corruption', type=str, default='gaussian_noise', 
                        help='Type of corruption to apply (e.g., gaussian_noise). Use None or empty string for clean data (no corruption).')
-    parser.add_argument('-severity', type=int, default=3, help='Severity of corruption (1-5)')
+    parser.add_argument('-severity', type=int, choices=[5], default=5, help='Severity of corruption (5 in the paper)')
     parser.add_argument('--no-corruption', action='store_true', 
                        help='Run inference without any corruption (clean test data)')
     parser.add_argument(
@@ -1222,7 +1222,7 @@ if __name__ == '__main__':
         '--prototype-metrics',
         action='store_true',
         default=True,
-        help='Enable prototype-based metrics (PAC, PCA, Sparsity) for TTA quality evaluation (default: enabled)'
+        help='Enable the prototype metrics (PAC, PCA-W, prediction stability) (default: enabled)'
     )
     
     parser.add_argument(
@@ -1257,7 +1257,7 @@ if __name__ == '__main__':
         '--use-enhanced-metrics',
         action='store_true',
         default=True,
-        help='Use enhanced prototype metrics - PCA-Weighted, Calibration, GT Contribution (default: enabled)'
+        help='Use the enhanced prototype metrics (PCA-W, prediction stability) (default: enabled)'
     )
     
     parser.add_argument(

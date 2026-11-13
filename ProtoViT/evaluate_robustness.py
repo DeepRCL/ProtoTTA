@@ -799,19 +799,15 @@ def main():
     parser.add_argument('--gpuid', type=str, default='0',
                        help='GPU ID to use')
     
-    # EATA settings
-    parser.add_argument('--use_clean_fisher', action='store_true', default=False,
-                       help='Use clean data to compute Fisher Information Matrix for EATA. Default is False (use test data).')
-    
     # Prototype metrics
     parser.add_argument('--prototype-metrics', action='store_true', default=False,
-                       help='Compute prototype-based metrics (PAC, PCA, Sparsity). Requires clean baseline.')
-    parser.add_argument('--proto-baseline-samples', type=int, default=1000,
-                       help='Number of clean samples to use for prototype baseline (default: 1000)')
+                       help='Compute the prototype metrics (PAC, PCA-W, prediction stability). Requires a clean baseline.')
+    parser.add_argument('--proto-baseline-samples', type=int, default=5794,
+                       help='Number of clean samples paired with the corrupted ones (CUB test set: 5794)')
     parser.add_argument('--track-efficiency', action='store_true', default=False,
                        help='Track and report computational efficiency metrics (timing, adapted parameters, etc.)')
     parser.add_argument('--use-enhanced-metrics', action='store_true', default=False,
-                       help='Use enhanced prototype metrics (PCA-Weighted, Calibration, GT Class Contribution).')
+                       help='Use the enhanced prototype metrics (PCA-W, prediction stability).')
     parser.add_argument('--modes', nargs='+', default=None,
                        help='Subset of modes to run. Choices: normal tent eata sar '
                             'proto_imp_conf_v3 (fixed lambda) '
@@ -845,8 +841,8 @@ def main():
                         help='Absolute [0,1] prototype-gradient consistency floor for the absolute router')
     parser.add_argument('--proto-lr', type=float, default=None,
                         help='ProtoTTA optimizer learning rate (default: canonical 1e-3)')
-    parser.add_argument('--proto-lambda-min', type=float, default=0.05)
-    parser.add_argument('--proto-lambda-max', type=float, default=0.95)
+    parser.add_argument('--proto-lambda-min', type=float, default=0.0)
+    parser.add_argument('--proto-lambda-max', type=float, default=1.0)
     parser.add_argument('--proto-record-diagnostics', action='store_true')
     # Component-ablation controls. Defaults reproduce the canonical main-table
     # adaptive configuration exactly; each flag changes only its named factor.
@@ -896,9 +892,9 @@ def main():
             parser.error('--stream mixed requires --stream-order shuffled')
         if 'all' in args.corruptions or len(args.corruptions) < 2:
             parser.error('--stream mixed requires an explicit ordered --corruptions list')
-        if args.on_the_fly or args.prototype_metrics or args.track_efficiency or args.use_clean_fisher:
+        if args.on_the_fly or args.prototype_metrics or args.track_efficiency:
             parser.error('--stream mixed supports neither --on_the_fly, '
-                         '--prototype-metrics, --track-efficiency nor --use_clean_fisher')
+                         '--prototype-metrics nor --track-efficiency')
     if args.stream_order == 'shuffled' and args.prototype_metrics:
         parser.error('--stream-order shuffled is not supported with --prototype-metrics '
                      '(clean/corrupted pairing assumes the published order)')
@@ -1026,44 +1022,8 @@ def main():
             modes[name] = {**modes[name],
                            'gradient_normalize': args.proto_gradient_normalize_override == 'on'}
 
-    # Compute Fishers GLOBAL if requested (Clean Data Access)
     fishers = None
-    if 'eata' in modes and args.use_clean_fisher:
-        print("\n" + "="*80)
-        print("Computing Fisher Information Matrix on CLEAN data for EATA")
-        print("="*80)
-        
-        # Load model
-        base_model = torch.load(args.model, weights_only=False)
-        base_model = base_model.to(device)
-        
-        # Load clean data (subset)
-        transform_clean = transforms.Compose([
-            transforms.Resize(size=(img_size, img_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std)
-        ])
-        clean_dataset = datasets.ImageFolder(clean_data_dir, transform_clean)
-        
-        num_fisher_samples = 2000
-        if len(clean_dataset) > num_fisher_samples:
-            fisher_indices = torch.randperm(len(clean_dataset))[:num_fisher_samples]
-            fisher_subset = torch.utils.data.Subset(clean_dataset, fisher_indices)
-        else:
-            fisher_subset = clean_dataset
-            
-        fisher_loader = torch.utils.data.DataLoader(
-            fisher_subset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True
-        )
-        
-        # Configure and compute
-        base_model = eata_adapt.configure_model(base_model)
-        fishers = eata_adapt.compute_fishers(base_model, fisher_loader, device)
-        print("Fisher information computed on CLEAN data.")
-        
-        del base_model
-        torch.cuda.empty_cache()
-    
+
     # Setup prototype metrics evaluator if requested
     proto_evaluator = None
     if args.prototype_metrics:

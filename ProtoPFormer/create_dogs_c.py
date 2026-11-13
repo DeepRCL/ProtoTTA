@@ -7,12 +7,12 @@ Usage:
         --input_dir  datasets/stanford_dogs \
         --output_dir datasets/stanford_dogs_c \
         --corruption all \
-        --severity 1 2 3 4 5
+        --severity 5
 
 Output structure:
     datasets/stanford_dogs_c/
         gaussian_noise/
-            1/ ... 5/   ← ImageFolder-compatible (class subfolders)
+            5/   ← ImageFolder-compatible (class subfolders)
         shot_noise/
             ...
 """
@@ -137,8 +137,8 @@ def main():
                         help='Output root for corrupted dataset')
     parser.add_argument('--corruption', nargs='+', default=['all'],
                         help='Corruption name(s) or "all"')
-    parser.add_argument('--severity', nargs='+', type=int, default=[1, 2, 3, 4, 5],
-                        help='Severity levels 1-5')
+    parser.add_argument('--severity', nargs='+', type=int, choices=[5], default=[5],
+                        help='Severity levels (the paper uses 5)')
     parser.add_argument('--no_skip', action='store_true',
                         help='Overwrite existing files')
     args = parser.parse_args()

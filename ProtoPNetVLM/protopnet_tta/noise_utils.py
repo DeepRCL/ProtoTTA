@@ -1,6 +1,6 @@
 """
 Corruption utilities for robustness testing, adapted from ImageNet-C.
-Supports all 19 corruption types from the ImageNet-C benchmark.
+Implements the 13 ImageNet-C corruption types used in the paper.
 """
 import torch
 import numpy as np
@@ -15,16 +15,6 @@ from scipy.ndimage.interpolation import map_coordinates
 import skimage as sk
 from skimage.filters import gaussian
 import cv2
-
-# Optional imports for motion blur effects
-try:
-    from wand.image import Image as WandImage
-    from wand.api import library as wandlibrary
-    import ctypes
-    WAND_AVAILABLE = True
-except ImportError as e:
-    warnings.warn(f"Wand library not available: {e}. Motion blur and snow effects will be disabled.")
-    WAND_AVAILABLE = False
 
 CORRUPTIONS_AVAILABLE = True
 
@@ -45,14 +35,6 @@ def disk(radius, alias_blur=0.1, dtype=np.float32):
     aliased_disk = np.array((X ** 2 + Y ** 2) <= radius ** 2, dtype=dtype)
     aliased_disk /= np.sum(aliased_disk)
     return cv2.GaussianBlur(aliased_disk, ksize=ksize, sigmaX=alias_blur)
-
-
-if WAND_AVAILABLE:
-    wandlibrary.MagickMotionBlurImage.argtypes = (ctypes.c_void_p, ctypes.c_double, ctypes.c_double, ctypes.c_double)
-
-    class MotionImage(WandImage):
-        def motion_blur(self, radius=0.0, sigma=0.0, angle=0.0):
-            wandlibrary.MagickMotionBlurImage(self.wand, radius, sigma, angle)
 
 
 def plasma_fractal(mapsize=256, wibbledecay=3):
@@ -142,25 +124,6 @@ def gaussian_blur(x, severity=1):
     return np.clip(x, 0, 1) * 255
 
 
-def glass_blur(x, severity=1):
-    """Apply glass blur effect."""
-    c = [(0.7, 1, 2), (0.9, 2, 1), (1, 2, 3), (1.1, 3, 2), (1.5, 4, 2)][severity - 1]
-    x = np.uint8(gaussian(np.array(x) / 255., sigma=c[0], channel_axis=-1) * 255)
-
-    # Get image size dynamically
-    h, w = x.shape[:2]
-
-    # Locally shuffle pixels
-    for i in range(c[2]):
-        for hh in range(h - c[1], c[1], -1):
-            for ww in range(w - c[1], c[1], -1):
-                dx, dy = np.random.randint(-c[1], c[1], size=(2,))
-                h_prime, w_prime = hh + dy, ww + dx
-                x[hh, ww], x[h_prime, w_prime] = x[h_prime, w_prime], x[hh, ww]
-
-    return np.clip(gaussian(x / 255., sigma=c[0], channel_axis=-1), 0, 1) * 255
-
-
 def defocus_blur(x, severity=1):
     """Apply defocus blur."""
     c = [(3, 0.1), (4, 0.5), (6, 0.5), (8, 0.5), (10, 0.5)][severity - 1]
@@ -173,40 +136,6 @@ def defocus_blur(x, severity=1):
     channels = np.array(channels).transpose((1, 2, 0))
 
     return np.clip(channels, 0, 1) * 255
-
-
-def motion_blur(x, severity=1):
-    """Apply motion blur."""
-    c = [(10, 3), (15, 5), (15, 8), (15, 12), (20, 15)][severity - 1]
-
-    output = BytesIO()
-    x.save(output, format='PNG')
-    x_wand = MotionImage(blob=output.getvalue())
-    x_wand.motion_blur(radius=c[0], sigma=c[1], angle=np.random.uniform(-45, 45))
-
-    x_blur = cv2.imdecode(np.frombuffer(x_wand.make_blob(), np.uint8), cv2.IMREAD_UNCHANGED)
-
-    if x_blur.shape != x.size[::-1]:
-        return np.clip(x_blur[..., [2, 1, 0]], 0, 255)  # BGR to RGB
-    else:  # greyscale to RGB
-        return np.clip(np.array([x_blur, x_blur, x_blur]).transpose((1, 2, 0)), 0, 255)
-
-
-def zoom_blur(x, severity=1):
-    """Apply zoom blur."""
-    c = [np.arange(1, 1.11, 0.01),
-         np.arange(1, 1.16, 0.01),
-         np.arange(1, 1.21, 0.02),
-         np.arange(1, 1.26, 0.02),
-         np.arange(1, 1.31, 0.03)][severity - 1]
-
-    x = (np.array(x) / 255.).astype(np.float32)
-    out = np.zeros_like(x)
-    for zoom_factor in c:
-        out += clipped_zoom(x, zoom_factor)
-
-    x = (x + out) / (len(c) + 1)
-    return np.clip(x, 0, 1) * 255
 
 
 def fog(x, severity=1):
@@ -254,85 +183,6 @@ def frost(x, severity=1, frost_path='./robustness/ImageNet-C/imagenet_c/imagenet
     return np.clip(c[0] * np.array(x) + c[1] * frost_crop, 0, 255)
 
 
-def snow(x, severity=1):
-    """Add snow effect."""
-    c = [(0.1, 0.3, 3, 0.5, 10, 4, 0.8),
-         (0.2, 0.3, 2, 0.5, 12, 4, 0.7),
-         (0.55, 0.3, 4, 0.9, 12, 8, 0.7),
-         (0.55, 0.3, 4.5, 0.85, 12, 8, 0.65),
-         (0.55, 0.3, 2.5, 0.85, 12, 12, 0.55)][severity - 1]
-
-    x_np = np.array(x, dtype=np.float32) / 255.
-    snow_layer = np.random.normal(size=x_np.shape[:2], loc=c[0], scale=c[1])
-
-    snow_layer = clipped_zoom(snow_layer[..., np.newaxis], c[2])
-    snow_layer[snow_layer < c[3]] = 0
-
-    snow_layer = Image.fromarray((np.clip(snow_layer.squeeze(), 0, 1) * 255).astype(np.uint8), mode='L')
-    output = BytesIO()
-    snow_layer.save(output, format='PNG')
-    snow_layer = MotionImage(blob=output.getvalue())
-    snow_layer.motion_blur(radius=c[4], sigma=c[5], angle=np.random.uniform(-135, -45))
-
-    snow_layer = cv2.imdecode(np.frombuffer(snow_layer.make_blob(), np.uint8), cv2.IMREAD_UNCHANGED) / 255.
-    snow_layer = snow_layer[..., np.newaxis]
-
-    x_gray = cv2.cvtColor(x_np.astype(np.float32), cv2.COLOR_RGB2GRAY).reshape(x_np.shape[0], x_np.shape[1], 1)
-    x_np = c[6] * x_np + (1 - c[6]) * np.maximum(x_np, x_gray * 1.5 + 0.5)
-    return np.clip(x_np + snow_layer + np.rot90(snow_layer, k=2), 0, 1) * 255
-
-
-def spatter(x, severity=1):
-    """Add spatter effect."""
-    c = [(0.65, 0.3, 4, 0.69, 0.6, 0),
-         (0.65, 0.3, 3, 0.68, 0.6, 0),
-         (0.65, 0.3, 2, 0.68, 0.5, 0),
-         (0.65, 0.3, 1, 0.65, 1.5, 1),
-         (0.67, 0.4, 1, 0.65, 1.5, 1)][severity - 1]
-    x_np = np.array(x, dtype=np.float32) / 255.
-
-    liquid_layer = np.random.normal(size=x_np.shape[:2], loc=c[0], scale=c[1])
-    liquid_layer = gaussian(liquid_layer, sigma=c[2])
-    liquid_layer[liquid_layer < c[3]] = 0
-
-    if c[5] == 0:
-        liquid_layer = (liquid_layer * 255).astype(np.uint8)
-        dist = 255 - cv2.Canny(liquid_layer, 50, 150)
-        dist = cv2.distanceTransform(dist, cv2.DIST_L2, 5)
-        _, dist = cv2.threshold(dist, 20, 20, cv2.THRESH_TRUNC)
-        dist = cv2.blur(dist, (3, 3)).astype(np.uint8)
-        dist = cv2.equalizeHist(dist)
-        ker = np.array([[-2, -1, 0], [-1, 1, 1], [0, 1, 2]])
-        dist = cv2.filter2D(dist, cv2.CV_8U, ker)
-        dist = cv2.blur(dist, (3, 3)).astype(np.float32)
-
-        m = cv2.cvtColor(liquid_layer * dist, cv2.COLOR_GRAY2BGRA)
-        m /= np.max(m, axis=(0, 1))
-        m *= c[4]
-
-        color = np.concatenate((175 / 255. * np.ones_like(m[..., :1]),
-                                238 / 255. * np.ones_like(m[..., :1]),
-                                238 / 255. * np.ones_like(m[..., :1])), axis=2)
-
-        color = cv2.cvtColor(color, cv2.COLOR_BGR2BGRA)
-        x_np = cv2.cvtColor(x_np, cv2.COLOR_BGR2BGRA)
-
-        return cv2.cvtColor(np.clip(x_np + m * color, 0, 1), cv2.COLOR_BGRA2BGR) * 255
-    else:
-        m = np.where(liquid_layer > c[3], 1, 0)
-        m = gaussian(m.astype(np.float32), sigma=c[4])
-        m[m < 0.8] = 0
-
-        color = np.concatenate((63 / 255. * np.ones_like(x_np[..., :1]),
-                                42 / 255. * np.ones_like(x_np[..., :1]),
-                                20 / 255. * np.ones_like(x_np[..., :1])), axis=2)
-
-        color *= m[..., np.newaxis]
-        x_np *= (1 - m[..., np.newaxis])
-
-        return np.clip(x_np + color, 0, 1) * 255
-
-
 def contrast(x, severity=1):
     """Reduce contrast."""
     c = [0.4, .3, .2, .1, .05][severity - 1]
@@ -347,16 +197,6 @@ def brightness(x, severity=1):
     x = np.array(x) / 255.
     x = sk.color.rgb2hsv(x)
     x[:, :, 2] = np.clip(x[:, :, 2] + c, 0, 1)
-    x = sk.color.hsv2rgb(x)
-    return np.clip(x, 0, 1) * 255
-
-
-def saturate(x, severity=1):
-    """Adjust saturation."""
-    c = [(0.3, 0), (0.1, 0), (2, 0), (5, 0.1), (20, 0.2)][severity - 1]
-    x = np.array(x) / 255.
-    x = sk.color.rgb2hsv(x)
-    x[:, :, 1] = np.clip(x[:, :, 1] * c[0] + c[1], 0, 1)
     x = sk.color.hsv2rgb(x)
     return np.clip(x, 0, 1) * 255
 
@@ -420,17 +260,11 @@ CORRUPTION_DICT = {
     'impulse_noise': impulse_noise,
     'speckle_noise': speckle_noise,
     'gaussian_blur': gaussian_blur,
-    # 'glass_blur': glass_blur,
     'defocus_blur': defocus_blur,
-    # 'motion_blur': motion_blur,
-    # 'zoom_blur': zoom_blur,
     'fog': fog,
     'frost': frost,
-    # 'snow': snow,
-    # 'spatter': spatter,
     'contrast': contrast,
     'brightness': brightness,
-    # 'saturate': saturate,
     'jpeg_compression': jpeg_compression,
     'pixelate': pixelate,
     'elastic_transform': elastic_transform,

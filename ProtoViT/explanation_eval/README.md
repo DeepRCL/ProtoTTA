@@ -36,8 +36,9 @@ R=results/explanation_eval
 ```
 
 `render_cards.py` uses the bundled font `assets/DejaVuSans-Bold.ttf`. Stimulus bytes also depend on the
-Pillow version; the reported runs rendered them with Pillow 10.0.1 (`narrator_analysis.py` re-renders
-the boards and checks them against the records of a run).
+Pillow version: render cards and boards, and run `narrator_analysis.py` (which re-renders the boards and
+checks them against the records of a run), with `pip install pillow==10.0.1`, the version of the reported
+runs.
 
 ## 1. Per-sample states of the Table 1 runs
 

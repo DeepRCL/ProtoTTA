@@ -256,9 +256,9 @@ def main():
     
     # Metrics settings
     parser.add_argument('--prototype-metrics', action='store_true', default=True,
-                       help='Compute prototype-based metrics (PAC, PCA, sparsity, etc.)')
+                       help='Compute the prototype metrics (PAC, PCA-W, prediction stability). Requires a clean baseline.')
     parser.add_argument('--use-enhanced-metrics', action='store_true', default=True,
-                       help='Use enhanced prototype metrics (PCA-weighted, calibration, GT contribution)')
+                       help='Use the enhanced prototype metrics (PCA-W, prediction stability).')
     parser.add_argument('--proto-baseline-samples', type=int, default=1000,
                        help='Number of clean samples to use for baseline (default: 1000)')
     parser.add_argument('--track-efficiency', action='store_true', default=True,

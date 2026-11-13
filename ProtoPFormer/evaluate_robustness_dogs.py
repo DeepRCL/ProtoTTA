@@ -524,7 +524,7 @@ def main():
     parser.add_argument('--model', required=True, help='Path to trained ProtoPFormer checkpoint')
     parser.add_argument('--data_dir', default='datasets/stanford_dogs_c', help='Pre-generated Dogs-C directory')
     parser.add_argument('--clean_dir', default=None, help='Clean Dogs test directory')
-    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--adapt_model_mode', choices=['train'], default='train',
@@ -535,13 +535,13 @@ def main():
                         help='Discard an existing output JSON instead of resuming it')
     parser.add_argument('--gpuid', type=str, default='0')
     parser.add_argument('--prototype-metrics', action='store_true', default=False,
-                        help='Compute prototype-based metrics (PAC, PCA, Sparsity). Requires clean baseline.')
-    parser.add_argument('--proto-baseline-samples', type=int, default=1000,
+                        help='Compute the prototype metrics (PAC, PCA-W, prediction stability). Requires a clean baseline.')
+    parser.add_argument('--proto-baseline-samples', type=int, default=8580,
                         help='Number of clean samples to use for prototype baseline')
     parser.add_argument('--track-efficiency', action='store_true', default=False,
                         help='Track and report computational efficiency metrics (timing, adapted parameters, etc.)')
     parser.add_argument('--use-enhanced-metrics', action='store_true', default=False,
-                        help='Use enhanced prototype metrics (PCA-Weighted, Calibration, GT Class Contribution).')
+                        help='Use the enhanced prototype metrics (PCA-W, prediction stability).')
     parser.add_argument('--modes', nargs='+', required=True, choices=[
         'normal', 'tent', 'eata', 'sar', 'memo', 'proto_tta',
         'proto_tta_adaptive_samplewise',
@@ -567,7 +567,7 @@ def main():
                         help='Number of AugMix views per MEMO test sample')
     parser.add_argument('--memo-steps', type=int, default=1,
                         help='Episodic MEMO update steps per test sample')
-    parser.add_argument('--proto_threshold', type=float, default=0.62,
+    parser.add_argument('--proto_threshold', type=float, default=0.55,
                         help='Geometric threshold for all ProtoTTA variants')
     parser.add_argument('--proto_mapping', type=str, default='sigmoid', choices=['sigmoid'],
                         help='Similarity mapping for all ProtoTTA variants')
@@ -597,8 +597,8 @@ def main():
     parser.add_argument('--proto_adaptive_topk', type=int, default=3)
     parser.add_argument('--proto_router_min_consistency', type=float, default=0.25,
                         help='Absolute [0,1] prototype-gradient consistency floor for the absolute router')
-    parser.add_argument('--proto_lambda_min', type=float, default=0.05)
-    parser.add_argument('--proto_lambda_max', type=float, default=0.95)
+    parser.add_argument('--proto_lambda_min', type=float, default=0.0)
+    parser.add_argument('--proto_lambda_max', type=float, default=1.0)
     parser.add_argument('--proto_record_diagnostics', action='store_true',
                         help='Save per-batch component losses, gradient norms, reliabilities, and lambda')
     parser.add_argument('--proto_gradient_normalize_override', default=None, choices=['on', 'off'],

@@ -7,18 +7,15 @@ Usage:
     python create_cub_c.py --input_dir ./datasets/cub200_cropped/test_cropped/ \
                            --output_dir ./datasets/cub200_c/ \
                            --corruption all \
-                           --severity 1,2,3,4,5
+                           --severity 5
 
 This will create a directory structure like:
     ./datasets/cub200_c/
         gaussian_noise/
-            1/  (severity 1)
-            2/
-            ...
-            5/
+            5/  (severity 5, ImageFolder class subfolders)
         shot_noise/
-            1/
-            ...
+            5/
+        ...
 """
 
 import os
@@ -43,7 +40,7 @@ def create_corrupted_dataset(input_dir, output_dir, corruption_types, severities
         input_dir: Path to clean dataset (ImageFolder format)
         output_dir: Path to save corrupted datasets
         corruption_types: List of corruption types to apply
-        severities: List of severity levels (1-5)
+        severities: List of severity levels (the paper uses 5)
         skip_existing: Whether to skip already corrupted images
     """
     input_path = Path(input_dir)
@@ -138,11 +135,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Create all corruptions with all severities
+  # Create all 13 corruptions at severity 5 (the paper's setting)
   python create_cub_c.py --corruption all
   
   # Create specific corruptions
-  python create_cub_c.py --corruption gaussian_noise shot_noise --severity 3 5
+  python create_cub_c.py --corruption gaussian_noise shot_noise
   
   # Specify custom directories
   python create_cub_c.py --input_dir ./my_dataset/ --output_dir ./my_dataset_c/
@@ -176,8 +173,9 @@ Available corruption types:
         '--severity',
         nargs='+',
         type=int,
-        default=[1, 2, 3, 4, 5],
-        help='Severity levels to generate (1-5). Default: all levels'
+        choices=[5],
+        default=[5],
+        help='Severity levels to generate (the paper uses 5)'
     )
     
     parser.add_argument(

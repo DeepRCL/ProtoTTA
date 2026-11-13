@@ -1084,7 +1084,7 @@ def main():
         '--prototype-metrics',
         action='store_true',
         default=False,
-        help='Compute prototype-based metrics (PAC, PCA, Sparsity)'
+        help='Compute the prototype metrics (PAC, PCA-W, prediction stability)'
     )
 
 
