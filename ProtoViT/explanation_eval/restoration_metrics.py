@@ -17,7 +17,7 @@ is to the clean explanation:
   S4a gt_loc_exact     share of active GT-class sub-patches at exactly the clean cell
   S4b gt_loc_within1   ... within one cell (Chebyshev)
 Every measure is also reported on the images where all three methods keep the clean prediction.
-Paired differences: cluster bootstrap over source images (2,000, seed 0).
+ProtoTTA - EATA: cluster bootstrap over source images (2,000, seed 0).
 """
 import argparse
 import hashlib
@@ -35,7 +35,7 @@ from consistency_stability import part_set  # noqa: E402
 from cub_parts import GRID, SLOT_ACTIVE, load_keypoints  # noqa: E402
 
 METHODS = ("unadapted", "eata", "prototta")
-PAIRS = (("prototta", "eata"), ("prototta", "unadapted"), ("eata", "unadapted"))
+PAIRS = (("prototta", "eata"),)
 SEVERITY = 5
 GATE = "exact_count_v2"
 METRICS = ("card_agreement", "card_part_jaccard", "any10_agreement", "gt_spearman", "gt_act_mae",
@@ -89,9 +89,8 @@ def boot(diff, clusters, seed=0):
         idx = rng.integers(0, len(uniq), len(uniq))
         stats[b] = sums[idx].sum() / counts[idx].sum()
     lo, hi = np.percentile(stats, [2.5, 97.5])
-    p = min(1.0, 2 * min((stats <= 0).mean(), (stats >= 0).mean()))
     return {"mean": float(diff.mean()), "ci_lo": float(lo), "ci_hi": float(hi),
-            "p_boot": float(max(p, 1 / N_BOOT)), "n": int(len(diff)), "n_clusters": int(len(uniq))}
+            "n": int(len(diff)), "n_clusters": int(len(uniq))}
 
 
 def summarize(tab, subset=None):

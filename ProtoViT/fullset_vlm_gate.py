@@ -8,10 +8,7 @@ export
     table and export sample predictions plus prototype evidence.
 score
     Query Qwen3.6 in batches only where BEFORE and AFTER predictions differ.
-    Matched conditions are image+predictions and image+paired reasoning boards.
-analyze
-    Apply ACCEPT/ROLLBACK decisions to every test prediction and report full-set
-    and prompt-development-excluded accuracy by corruption.
+    Conditions are image+predictions and image+paired reasoning boards.
 
 Ground truth is stored by export for evaluation but never rendered or included
 in VLM prompts.
@@ -28,7 +25,7 @@ import re
 import tempfile
 import textwrap
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, Sequence, Tuple
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -50,10 +47,6 @@ CORRUPTIONS = [
     "pixelate",
 ]
 CONDITIONS = ["image_predictions", "full_reasoning"]
-CONDITION_NAMES = {
-    "image_predictions": "Image + predictions/confidence",
-    "full_reasoning": "Image + predictions/confidence + paired reasoning boards",
-}
 MODEL_ID = "Qwen/Qwen3.6-35B-A3B"
 LOGGER = logging.getLogger("fullset_vlm_gate")
 
@@ -93,13 +86,6 @@ def parse_args() -> argparse.Namespace:
     score.add_argument("--max-samples", type=int, default=None)
     score.add_argument("--allow-incomplete-export", action="store_true", help=argparse.SUPPRESS)
     score.add_argument("--overwrite", action="store_true")
-
-    analyze = subparsers.add_parser("analyze")
-    analyze.add_argument(
-        "--development-subset",
-        type=Path,
-        default=root / "results" / "vlm_eval" / "subset.json",
-    )
     return parser.parse_args()
 
 
@@ -147,16 +133,11 @@ def exact_fixed_prototta(base_model):
         base_model,
         use_importance=True,
         use_confidence=True,
-        reset_mode=None,
-        reset_frequency=10,
-        confidence_threshold=0.7,
-        ema_alpha=0.999,
         use_geometric_filter=True,
         geo_filter_threshold=0.92,
         consensus_strategy="top_k_mean",
         consensus_ratio=0.5,
         adaptation_mode="layernorm_attn_bias",
-        use_ensemble_entropy=False,
         logit_weight=0.0,
         shared_confidence_weighting=True,
         gradient_normalize=True,
@@ -719,207 +700,6 @@ def development_keys(path: Path) -> set:
     }
 
 
-def paired_ttest(left: Sequence[float], right: Sequence[float]) -> Dict:
-    from scipy.stats import ttest_rel
-
-    statistic, pvalue = ttest_rel(left, right)
-    delta = np.asarray(left) - np.asarray(right)
-    return {
-        "mean_difference": float(np.mean(delta)),
-        "t_statistic": float(statistic),
-        "p_value": float(pvalue),
-    }
-
-
-def evaluate_split(
-    exports: Dict[str, Dict],
-    scores: Dict[str, Dict[str, Dict]],
-    excluded: set,
-) -> Dict:
-    methods = ["unadapted", "prototta", *CONDITIONS, "oracle"]
-    per_corruption = {method: {} for method in methods}
-    counts = {method: {} for method in methods}
-    action_counts = {condition: {"ACCEPT": 0, "ROLLBACK": 0} for condition in CONDITIONS}
-    diagnostics = {
-        condition: {
-            "beneficial_updates": 0,
-            "beneficial_updates_accepted": 0,
-            "harmful_updates": 0,
-            "harmful_updates_rolled_back": 0,
-            "both_wrong_disagreements": 0,
-        }
-        for condition in CONDITIONS
-    }
-    for corruption in CORRUPTIONS:
-        records = exports[corruption]["records"]
-        selected = [(key, record) for key, record in records.items() if key not in excluded]
-        correct = {method: 0 for method in methods}
-        for key, record in selected:
-            correct["unadapted"] += int(record["before_correct"])
-            correct["prototta"] += int(record["after_correct"])
-            correct["oracle"] += int(record["before_correct"] or record["after_correct"])
-            changed = record["before_prediction_index"] != record["after_prediction_index"]
-            for condition in CONDITIONS:
-                action = scores[condition][corruption]["entries"][key]["action"] if changed else "ACCEPT"
-                if changed:
-                    action_counts[condition][action] += 1
-                    before_correct = bool(record["before_correct"])
-                    after_correct = bool(record["after_correct"])
-                    diagnostic = diagnostics[condition]
-                    if after_correct and not before_correct:
-                        diagnostic["beneficial_updates"] += 1
-                        diagnostic["beneficial_updates_accepted"] += int(action == "ACCEPT")
-                    elif before_correct and not after_correct:
-                        diagnostic["harmful_updates"] += 1
-                        diagnostic["harmful_updates_rolled_back"] += int(action == "ROLLBACK")
-                    else:
-                        diagnostic["both_wrong_disagreements"] += 1
-                correct[condition] += int(record["after_correct"] if action == "ACCEPT" else record["before_correct"])
-        for method in methods:
-            per_corruption[method][corruption] = correct[method] / len(selected)
-            counts[method][corruption] = {"correct": correct[method], "n": len(selected)}
-    summary = {
-        method: {
-            "accuracy": float(np.mean(list(per_corruption[method].values()))),
-            "per_corruption": per_corruption[method],
-            "correct": int(sum(item["correct"] for item in counts[method].values())),
-            "n": int(sum(item["n"] for item in counts[method].values())),
-        }
-        for method in methods
-    }
-    for diagnostic in diagnostics.values():
-        beneficial = diagnostic["beneficial_updates"]
-        harmful = diagnostic["harmful_updates"]
-        diagnostic["beneficial_accept_rate"] = diagnostic["beneficial_updates_accepted"] / beneficial
-        diagnostic["harmful_rollback_rate"] = diagnostic["harmful_updates_rolled_back"] / harmful
-        diagnostic["decisive_selection_accuracy"] = (
-            diagnostic["beneficial_updates_accepted"] + diagnostic["harmful_updates_rolled_back"]
-        ) / (beneficial + harmful)
-    return {
-        "summary": summary,
-        "actions_on_disagreements": action_counts,
-        "decision_diagnostics": diagnostics,
-        "paired_tests": {
-            "boards_vs_prototta": paired_ttest(
-                list(per_corruption["full_reasoning"].values()),
-                list(per_corruption["prototta"].values()),
-            ),
-            "boards_vs_image_only": paired_ttest(
-                list(per_corruption["full_reasoning"].values()),
-                list(per_corruption["image_predictions"].values()),
-            ),
-        },
-    }
-
-
-def report_markdown(payload: Dict) -> str:
-    primary = payload["held_out_primary"]
-    full = payload["full_secondary"]
-    labels = {
-        "unadapted": "Unadapted",
-        "prototta": "Fixed ProtoTTA",
-        "image_predictions": "VLM gate without boards",
-        "full_reasoning": "VLM gate with boards",
-        "oracle": "Oracle before/after",
-    }
-    lines = [
-        "# Full-set VLM-Gated ProtoTTA",
-        "",
-        "Qwen3.6-35B-A3B was used in deterministic non-thinking mode. Ground truth was hidden during every VLM decision. The gate was queried only when source and fixed-ProtoTTA predictions differed.",
-        "",
-        "## Primary: prompt-development samples excluded",
-        "",
-        "Method | Accuracy | Correct / N",
-        "------ | -------- | -----------",
-    ]
-    for method, label in labels.items():
-        item = primary["summary"][method]
-        lines.append(f"{label} | {100*item['accuracy']:.2f}% | {item['correct']} / {item['n']}")
-    lines.extend(["", "## Secondary: complete CUB-200-C test set", "", "Method | Accuracy | Correct / N", "------ | -------- | -----------"])
-    for method, label in labels.items():
-        item = full["summary"][method]
-        lines.append(f"{label} | {100*item['accuracy']:.2f}% | {item['correct']} / {item['n']}")
-    lines.extend(
-        [
-            "",
-            "## Primary per-corruption comparison",
-            "",
-            "Corruption | ProtoTTA | No boards | Boards | Boards - ProtoTTA | Boards - No boards",
-            "---------- | -------- | --------- | ------ | ------------------ | ------------------",
-        ]
-    )
-    for corruption in CORRUPTIONS:
-        prototta = primary["summary"]["prototta"]["per_corruption"][corruption]
-        image_only = primary["summary"]["image_predictions"]["per_corruption"][corruption]
-        boards = primary["summary"]["full_reasoning"]["per_corruption"][corruption]
-        lines.append(
-            f"{corruption} | {100*prototta:.2f}% | {100*image_only:.2f}% | {100*boards:.2f}% | "
-            f"{100*(boards-prototta):+.2f} | {100*(boards-image_only):+.2f}"
-        )
-    lines.extend(
-        [
-            "",
-            "## Label-revealed decision diagnostics (primary, post-hoc only)",
-            "",
-            "Condition | Accept beneficial | Roll back harmful | Decisive selection accuracy",
-            "--------- | ----------------- | ----------------- | ---------------------------",
-        ]
-    )
-    for condition in CONDITIONS:
-        item = primary["decision_diagnostics"][condition]
-        lines.append(
-            f"{CONDITION_NAMES[condition]} | {100*item['beneficial_accept_rate']:.2f}% | "
-            f"{100*item['harmful_rollback_rate']:.2f}% | {100*item['decisive_selection_accuracy']:.2f}%"
-        )
-    lines.extend(["", "## Paired corruption-level tests (primary)", ""])
-    for name, item in primary["paired_tests"].items():
-        lines.append(f"- `{name}`: delta={100*item['mean_difference']:+.2f} points, paired t-test p={item['p_value']:.6f}.")
-    lines.extend(
-        [
-            "",
-            "## Protocol notes",
-            "",
-            f"- Prompt-development exclusions: {payload['num_development_samples']} method-sample cases.",
-            "- Both VLM conditions receive the corrupted image, before/after predictions, MSP values, and identical temporal instructions. Only the paired prototype reasoning evidence differs.",
-            "- Unchanged predictions default to AFTER because accepting or rolling back cannot alter their predicted label.",
-        ]
-    )
-    return "\n".join(lines) + "\n"
-
-
-def run_analyze(args: argparse.Namespace) -> None:
-    exports = {corruption: read_json(export_path(args.output_dir, corruption)) for corruption in CORRUPTIONS}
-    scores = {
-        condition: {
-            corruption: read_json(score_path(args.output_dir, condition, corruption))
-            for corruption in CORRUPTIONS
-        }
-        for condition in CONDITIONS
-    }
-    for corruption, export in exports.items():
-        if not export.get("complete"):
-            raise RuntimeError(f"Incomplete export: {corruption}")
-        expected = set(export["evidence"])
-        for condition in CONDITIONS:
-            available = set(scores[condition][corruption].get("entries", {}))
-            if available != expected:
-                raise RuntimeError(f"Incomplete scores: {condition}/{corruption} {len(available)}/{len(expected)}")
-    dev = development_keys(args.development_subset)
-    payload = {
-        "schema_version": 1,
-        "vlm_model_id": MODEL_ID,
-        "thinking_enabled": False,
-        "ground_truth_visible_to_vlm": False,
-        "num_development_samples": len(dev),
-        "held_out_primary": evaluate_split(exports, scores, dev),
-        "full_secondary": evaluate_split(exports, scores, set()),
-    }
-    write_json(args.output_dir / "fullset_vlm_gate_metrics.json", payload)
-    markdown = report_markdown(payload)
-    (args.output_dir / "README.md").write_text(markdown, encoding="utf-8")
-    print(markdown)
-
-
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     args = parse_args()
@@ -927,11 +707,8 @@ def main() -> None:
         setattr(args, name, getattr(args, name).resolve())
     if args.command == "export":
         run_export(args)
-    elif args.command == "score":
-        run_score(args)
     else:
-        args.development_subset = args.development_subset.resolve()
-        run_analyze(args)
+        run_score(args)
 
 
 if __name__ == "__main__":

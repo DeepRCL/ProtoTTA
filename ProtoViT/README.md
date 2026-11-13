@@ -34,8 +34,7 @@ O and P) is in [`explanation_eval/`](explanation_eval).
 | `model.py`, `tools/`, `settings.py`, `main.py`, `train_and_test.py`, `push_greedy.py`, `helpers.py`, `preprocess.py`, `save.py`, `log.py` | ProtoViT model and training (upstream code; `main.py` produces the checkpoint) |
 | `vlm_eval.py` | Reasoning boards, VLM scoring (Table 9 left, Figure 5) and VLM narration (Figure 2) |
 | `fullset_vlm_gate.py`, `analyze_judge_intervention.py` | Label-free judge intervention (Table 8) |
-| `run_inference.py`, `interpretability_viz.py`, `local_analysis.py`, `analysis_settings.py` | Qualitative figures and per-batch accuracy (Figures 3 and 6–8) |
-| `loss_adapt.py`, `fisher_proto.py`, `semantic_prototype_guidance.py` | Modules imported by `run_inference.py` and `proto_entropy.py` |
+| `run_inference.py`, `interpretability_viz.py` | Qualitative figures and per-batch accuracy (Figures 3 and 6–8) |
 
 `../ProtoPFormer` also loads `efficiency_metrics.py` and `fullset_vlm_gate.py`
 from this directory, so keep the repository layout unchanged.

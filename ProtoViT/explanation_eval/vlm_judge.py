@@ -232,14 +232,6 @@ def build_schedule(items, mode, seed, methods=PAIR_METHODS):
     return plan
 
 
-def position_counts(plan, labels=("A", "B")):
-    counts = {}
-    for step in plan:
-        for pos, m in zip(labels, step["order"]):
-            counts[(m, pos)] = counts.get((m, pos), 0) + 1
-    return counts
-
-
 def main():
     import numpy as np
     from PIL import Image
@@ -270,7 +262,7 @@ def main():
     design = DESIGNS[args.design]
     if args.schedule not in design["schedules"]:
         raise SystemExit(f"schedule {args.schedule} is not valid for design {args.design}")
-    methods, labels = design["methods"], design["labels"]
+    methods = design["methods"]
     instr = instructions_for(args.card_background, args.design)
 
     items_bytes = Path(args.items).read_bytes()
@@ -304,7 +296,6 @@ def main():
     stim_hash = {i: {k: sha256_bytes(v) for k, v in d.items()} for i, d in stimuli.items()}
     # Qwen3-VL-*-Thinking and Qwen3.6 (thinking by default) must close their reasoning
     require_think_end = args.enable_thinking != "off" and ("Thinking" in args.model_id or "Qwen3.6" in args.model_id)
-    print("[vlm] method-position counts:", position_counts(plan, labels), flush=True)
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

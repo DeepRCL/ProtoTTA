@@ -15,10 +15,6 @@ N_BOOT = 5000
 SEED = 20261107
 
 
-def sign(x):
-    return (x > 0) - (x < 0)
-
-
 def load(files, item_ids):
     """Final record per (item, presentation) among the study items; all records counted."""
     recs, final = [], {}
@@ -47,10 +43,10 @@ def boot_ci(stat, items, rng):
     return [vals[int(0.025 * (len(vals) - 1))], vals[int(0.975 * (len(vals) - 1))]]
 
 
-def summarize(final, item_ids, rng, exclude=frozenset()):
-    """Final outcomes. `exclude`: (item, presentation) keys dropped; an item missing a presentation
-    is not complete and gets no item score."""
-    ok = {k: r for k, r in final.items() if r["status"] == "ok" and k not in exclude}
+def summarize(final, item_ids, rng):
+    """ProtoTTA share among decisive presentations (item-bootstrap CI) and item scores; an item
+    missing an answered presentation gets no item score."""
+    ok = {k: r for k, r in final.items() if r["status"] == "ok"}
     pres = {k: SCORE[r["choice_methods"]["better"]] for k, r in ok.items()}
     per_item = {}
     for (i, p), s in pres.items():
@@ -65,14 +61,8 @@ def summarize(final, item_ids, rng, exclude=frozenset()):
 
     c = Counter("P" if s > 0 else "E" if s < 0 else "same" for s in pres.values())
     return {
-        "presentations_planned": 2 * len(item_ids), "presentations_final": len(final),
-        "final_status": dict(Counter(r["status"] for r in final.values())),
-        "presentations_excluded": len(exclude), "presentations_used": len(pres),
         "presentation_counts": dict(c),
         "win_rate": win(sorted(item_ids)), "win_rate_ci95": boot_ci(win, sorted(item_ids), rng),
-        "items_complete": len(complete),
-        "item_preferences": dict(Counter("P" if s > 0 else "E" if s < 0 else "tie" for s in item_score.values())),
-        "order_consistent_items": sum(1 for i in complete if per_item[i][0] == per_item[i][1] != 0),
         "item_scores": item_score,
     }
 

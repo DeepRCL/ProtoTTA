@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT))
 import protopformer
 from enhanced_prototype_metrics import EnhancedPrototypeMetrics
 from memo_adapt import setup_memo
-from noise_utils import CORRUPTION_TYPES, get_corrupted_transform
+from noise_utils import CORRUPTION_TYPES
 from proto_tta import compute_fishers, setup_eata, setup_proto_tta, setup_tent
 from prototype_tta_metrics import PrototypeMetricsEvaluator
 from sar_adapt import setup_sar
@@ -162,17 +162,6 @@ def load_corrupted_dataset(data_dir, corruption_type, severity, batch_size, num_
     )
 
 
-def load_on_the_fly(clean_dir, corruption_type, severity, batch_size, num_workers=4):
-    transform = get_corrupted_transform(
-        IMG_SIZE, IMAGENET_MEAN, IMAGENET_STD, corruption_type, severity
-    )
-    dataset = _build_test_subset_dataset(clean_dir, transform)
-    return torch.utils.data.DataLoader(
-        dataset, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True, drop_last=False
-    )
-
-
 def _output_logits(outputs):
     return outputs[0] if isinstance(outputs, tuple) else outputs
 
@@ -303,16 +292,9 @@ def setup_method(model, mode_name, mode_config, device, model_path, loader, fish
             model,
             lr=mode_config.get('lr', 1e-3),
             steps=mode_config.get('steps', 1),
-            episodic=mode_config.get('episodic', False),
             use_importance=mode_config.get('use_importance', True),
-            use_confidence=mode_config.get('use_confidence', True),
-            adapt_all_prototypes=mode_config.get('adapt_all_prototypes', False),
-            use_geometric_filter=mode_config.get('use_geometric_filter', True),
             geo_filter_threshold=mode_config.get('geo_filter_threshold', 0.30),
-            consensus_strategy=mode_config.get('consensus_strategy', 'max'),
-            consensus_ratio=mode_config.get('consensus_ratio', 0.5),
             adaptation_mode=mode_config.get('adaptation_mode', 'layernorm_attn_bias'),
-            use_branch_agreement=mode_config.get('use_branch_agreement', False),
             prototype_branch=mode_config.get('prototype_branch', 'both'),
             similarity_mapping=mode_config.get('similarity_mapping', 'sigmoid'),
             sigmoid_center=mode_config.get('sigmoid_center', 1.0),
@@ -322,26 +304,14 @@ def setup_method(model, mode_name, mode_config, device, model_path, loader, fish
             shared_confidence_weighting=mode_config.get('shared_confidence_weighting', False),
             gradient_normalize=mode_config.get('gradient_normalize', False),
             adaptive_lambda=mode_config.get('adaptive_lambda', False),
-            adaptive_lambda_strategy=mode_config.get('adaptive_lambda_strategy', 'relative_reliability'),
+            adaptive_lambda_strategy=mode_config.get('adaptive_lambda_strategy'),
             adaptive_delta0=mode_config.get('adaptive_delta0', 0.25),
             adaptive_topk=mode_config.get('adaptive_topk', 3),
             router_min_consistency=mode_config.get('router_min_consistency', 0.25),
-            lambda_ema_momentum=mode_config.get('lambda_ema_momentum', 0.9),
             lambda_min=mode_config.get('lambda_min', 0.05),
             lambda_max=mode_config.get('lambda_max', 0.95),
             record_diagnostics=mode_config.get('record_diagnostics', False),
-            lambda_search=mode_config.get('lambda_search', False),
-            lambda_search_radius=mode_config.get('lambda_search_radius', 0.1),
-            lambda_search_teacher_temp=mode_config.get('lambda_search_teacher_temp', 0.5),
-            lambda_search_min_improvement=mode_config.get('lambda_search_min_improvement', 0.0),
-            samplewise_lambda=mode_config.get('samplewise_lambda', False),
-            adaptive_branch_weighting=mode_config.get('adaptive_branch_weighting', False),
-            branch_weight_floor=mode_config.get('branch_weight_floor', 0.1),
             model_mode=mode_config.get('model_mode', 'train'),
-            reset_mode=mode_config.get('reset_mode', None),
-            reset_frequency=mode_config.get('reset_frequency', 10),
-            confidence_threshold=mode_config.get('confidence_threshold', 0.7),
-            ema_alpha=mode_config.get('ema_alpha', 0.999),
         )
     raise ValueError(f'Unknown mode: {mode_name}')
 
@@ -352,7 +322,6 @@ def evaluate_single_combination(
     severity,
     data_dir,
     clean_dir,
-    on_the_fly,
     mode_name,
     mode_config,
     device,
@@ -371,9 +340,7 @@ def evaluate_single_combination(
         # MEMO is episodic and adapts one test image at a time. Its independent
         # ``batch_size`` setting is the number of augmented views per image.
         loader_batch_size = 1 if mode_name == 'memo' else batch_size
-        loader = load_on_the_fly(
-            clean_dir, corruption_type, severity, loader_batch_size, num_workers
-        ) if on_the_fly else load_corrupted_dataset(
+        loader = load_corrupted_dataset(
             data_dir, corruption_type, severity, loader_batch_size, num_workers
         )
         if compute_proto_metrics and proto_evaluator is not None:
@@ -468,7 +435,6 @@ def build_run_config(args, selected_modes, corruptions, clean_dir):
         'model': os.path.abspath(args.model),
         'data_dir': os.path.abspath(args.data_dir),
         'clean_dir': os.path.abspath(clean_dir),
-        'on_the_fly': False,
         'batch_size': args.batch_size,
         'seed': args.seed,
         'adapt_model_mode': args.adapt_model_mode,
@@ -478,7 +444,6 @@ def build_run_config(args, selected_modes, corruptions, clean_dir):
         'corruptions': corruptions,
         'lr': args.lr,
         'steps': args.steps,
-        'use_global_fisher': False,
         'sar_lr': args.sar_lr,
         'sar_margin': args.sar_margin,
         'sar_reset': args.sar_reset,
@@ -492,8 +457,6 @@ def build_run_config(args, selected_modes, corruptions, clean_dir):
         'proto_sigmoid_temp': args.proto_sigmoid_temp,
         'proto_branch': args.proto_branch,
         'proto_use_importance': not args.proto_no_importance,
-        'proto_branch_agreement': False,
-        'proto_all_prototypes': False,
         'proto_lambda': args.proto_lambda,
         'proto_shared_confidence_weighting': args.proto_shared_confidence_weighting,
         'proto_gradient_normalize': args.proto_gradient_normalize,
@@ -504,10 +467,6 @@ def build_run_config(args, selected_modes, corruptions, clean_dir):
         'proto_lambda_min': args.proto_lambda_min,
         'proto_lambda_max': args.proto_lambda_max,
         'proto_record_diagnostics': args.proto_record_diagnostics,
-        'proto_lambda_search_radius': 0.1,
-        'proto_lambda_search_teacher_temp': 0.5,
-        'proto_lambda_search_min_improvement': 0.0,
-        'proto_branch_weight_floor': 0.1,
         'prototype_metrics': args.prototype_metrics,
         'proto_baseline_samples': args.proto_baseline_samples,
         'use_enhanced_metrics': args.use_enhanced_metrics,
@@ -627,8 +586,9 @@ def main():
                         help='Apply the same confidence weight to prototype and output losses')
     parser.add_argument('--proto_gradient_normalize', action='store_true',
                         help='Normalize each loss by its gradient norm before interpolation')
-    parser.add_argument('--proto_lambda_ema_momentum', type=float, default=0.9)
-    parser.add_argument('--proto_adaptive_strategy', default='relative_reliability',
+    parser.add_argument('--proto_lambda_ema_momentum', type=float, default=0.9,
+                        help='Recorded in the run configuration; lambda is not smoothed over batches')
+    parser.add_argument('--proto_adaptive_strategy', default=None,
                         choices=['activation_margin', 'relative_evidence', 'mean_act_rel',
                                  'source_free_router_absolute',
                                  'source_free_router_coverage_absolute'],
@@ -645,7 +605,7 @@ def main():
                         help='Force gradient normalization on/off for the selected ProtoTTA modes')
     args = parser.parse_args()
 
-    if (args.proto_adaptive_strategy == 'relative_reliability'
+    if (args.proto_adaptive_strategy is None
             and 'proto_tta_adaptive_samplewise' in args.modes):
         parser.error('proto_tta_adaptive_samplewise requires --proto_adaptive_strategy '
                      '(activation_margin, relative_evidence or mean_act_rel)')
@@ -674,27 +634,19 @@ def main():
 
     proto_common = {
         'lr': args.lr, 'steps': args.steps,
-        'use_importance': not args.proto_no_importance, 'use_confidence': True,
-        'adapt_all_prototypes': False,
-        'use_geometric_filter': True, 'geo_filter_threshold': args.proto_threshold,
-        'consensus_strategy': 'max', 'consensus_ratio': 0.5,
+        'use_importance': not args.proto_no_importance,
+        'geo_filter_threshold': args.proto_threshold,
         'adaptation_mode': 'layernorm_attn_bias',
-        'use_branch_agreement': False,
         'prototype_branch': args.proto_branch, 'similarity_mapping': args.proto_mapping,
         'sigmoid_center': args.proto_sigmoid_center, 'sigmoid_temp': args.proto_sigmoid_temp,
         'shared_confidence_weighting': args.proto_shared_confidence_weighting,
         'gradient_normalize': args.proto_gradient_normalize,
-        'lambda_ema_momentum': args.proto_lambda_ema_momentum,
         'adaptive_lambda_strategy': args.proto_adaptive_strategy,
         'adaptive_delta0': args.proto_adaptive_delta0,
         'adaptive_topk': args.proto_adaptive_topk,
         'router_min_consistency': args.proto_router_min_consistency,
         'lambda_min': args.proto_lambda_min, 'lambda_max': args.proto_lambda_max,
         'record_diagnostics': args.proto_record_diagnostics,
-        'lambda_search_radius': 0.1,
-        'lambda_search_teacher_temp': 0.5,
-        'lambda_search_min_improvement': 0.0,
-        'branch_weight_floor': 0.1,
         'model_mode': args.adapt_model_mode,
     }
     modes = {
@@ -722,14 +674,12 @@ def main():
             **proto_common,
             'proto_weight': 0.5, 'logit_weight': 0.5,
             'adaptive_lambda': True,
-            'samplewise_lambda': True,
         },
         'proto_tta_adaptive_source_free_router_absolute': {
             **proto_common,
             'proto_weight': 0.5, 'logit_weight': 0.5,
             'adaptive_lambda': True,
             'adaptive_lambda_strategy': 'source_free_router_absolute',
-            'samplewise_lambda': True,
             'gradient_normalize': True,
         },
         'proto_tta_adaptive_source_free_router_coverage_absolute': {
@@ -737,7 +687,6 @@ def main():
             'proto_weight': 0.5, 'logit_weight': 0.5,
             'adaptive_lambda': True,
             'adaptive_lambda_strategy': 'source_free_router_coverage_absolute',
-            'samplewise_lambda': True,
             'gradient_normalize': True,
         },
     }
@@ -804,7 +753,6 @@ def main():
             severity=args.severity,
             data_dir=args.data_dir,
             clean_dir=clean_dir,
-            on_the_fly=False,
             mode_name=mode_name,
             mode_config=modes[mode_name],
             device=device,

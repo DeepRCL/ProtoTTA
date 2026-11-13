@@ -11,11 +11,11 @@ overhead of the full controller (Section 5 and Appendix N).
 | File | Role |
 |---|---|
 | `evaluate_robustness.py` | Evaluator for all methods on SICAPv2-C (accuracy, PAC, PCA-W, prediction stability, selection rate, timing) |
-| `proto_entropy.py`, `proto_entropy_enhanced.py` | Prototype entropy, fixed-λ objective and adaptive controller |
+| `proto_entropy_enhanced.py` | Prototype entropy, fixed-λ objective and adaptive controller |
 | `tent.py`, `eata_adapt.py`, `sar_adapt.py`, `loss_adapt.py` | Tent, EATA, SAR and MEMO baselines |
 | `prototype_metrics.py`, `enhanced_prototype_metrics.py`, `efficiency_metrics.py` | PAC, PCA-W, prediction stability and timing |
 | `noise_utils.py`, `create_sicap_c.py` | The corruptions and the SICAPv2-C generator |
-| `settings.py`, `preprocess.py`, `train_and_test.py` | Shared settings and helpers |
+| `settings.py`, `preprocess.py` | Shared settings and helpers |
 | `vlm_prototta_common.py`, `vlm_prototta_export.py`, `vlm_prototta_score.py`, `vlm_prototta_analyze.py` | Judge intervention of Appendix C (Table 8) |
 
 ## Requirements

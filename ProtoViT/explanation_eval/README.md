@@ -31,7 +31,6 @@ export PROTOVIT_CHECKPOINT=/path/to/14finetuned0.8609.pth            # ProtoViT 
 export PROTOVIT_PROTOTYPE_DIR=/path/to/img/epoch-4                     # prototype-img-original<p>.png, bb4.npy
 export CUB_ROOT=/path/to/CUB_200_2011                                  # images.txt, bounding_boxes.txt, parts/
 export CUB_TEST_CROPPED=/path/to/cub200_cropped/test_cropped           # clean cropped test photos
-export CUB_SEGMENTATIONS=/path/to/segmentations                        # CUB segmentation masks (narrator only)
 E=explanation_eval
 R=results/explanation_eval
 ```
@@ -202,8 +201,8 @@ python $E/pcaw_vs_preference.py --items $R/vlm104/items_vlm104.json --states_roo
 `analyze` prints the Pearson and Spearman correlations of exact sample-level PCA-W with the three VLM
 scores, pooled over the 1,300 method–image observations and after centring each method.
 `pcaw_vlm_partial.py` prints, for each score, the partial Spearman correlation controlling for
-prediction correctness, corruption type and method (pooled over both methods), the same within each
-method (controlling for correctness and corruption type), and the Spearman correlation among correctly
-classified observations. `pcaw_vs_preference.py` correlates Gemini's 104-image preference with the
-PCA-W difference between ProtoTTA and EATA, on all images and on those where both methods are equally
-correct (item bootstrap CIs, 2,000 resamples).
+prediction correctness, corruption type and method (pooled over both methods) and within each method
+(controlling for correctness and corruption type), and the Spearman correlation among correctly
+classified observations (pooled over both methods). `pcaw_vs_preference.py` correlates Gemini's
+104-image preference with the PCA-W difference between ProtoTTA and EATA, on all images and on those
+where both methods are equally correct (item bootstrap CIs, 2,000 resamples).

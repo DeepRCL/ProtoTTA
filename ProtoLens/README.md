@@ -12,7 +12,7 @@ biases are adapted in evaluation mode with Adam (betas 0.9/0.999, no weight
 decay), learning rate 5e-6, batch size 128, one update per accepted batch.
 Reliability filter: mean of the top 25 of the 50 cosine similarities >= 0.1.
 Prototype activations: sigmoid(5 * clip(similarity, -1, 1)). No sample-confidence
-weighting. lambda in [0, 1], no smoothing. Adaptation is continual within each
+weighting. lambda in [0, 1], no smoothing. Updates accumulate within each
 corruption-severity setting, and the source checkpoint is restored between
 settings. Seeds 0, 2 and 3.
 

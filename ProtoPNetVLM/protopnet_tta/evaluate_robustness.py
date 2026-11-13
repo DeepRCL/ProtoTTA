@@ -42,7 +42,6 @@ from proto_baseline import ProtoPNetModel, ModelConfig, HeadConfig
 
 # Import TTA methods
 from . import tent
-from . import proto_entropy
 from . import proto_entropy_enhanced
 from . import eata_adapt
 from . import sar_adapt
@@ -270,25 +269,6 @@ def setup_eata(model, test_loader, device):
     )
 
 
-def setup_proto_entropy(model, geo_filter_threshold=0.993, adaptation_mode='all_adapt'):
-    """Set up ProtoEntropy with configurable adaptation mode."""
-    model = proto_entropy.configure_model(model, adaptation_mode=adaptation_mode)
-    params, _ = proto_entropy.collect_params(model, adaptation_mode=adaptation_mode)
-
-    optimizer = setup_optimizer(params) if params else None
-
-    return proto_entropy.ProtoEntropy(
-        model, optimizer,
-        steps=cfg_optim.STEPS,
-        episodic=False,
-        use_prototype_importance=True,
-        use_confidence_weighting=True,
-        confidence_threshold=0.7,
-        use_geometric_filter=True,
-        geo_filter_threshold=geo_filter_threshold
-    )
-
-
 def setup_sar(model):
     """Set up SAR adaptation."""
     model = sar_adapt.configure_model(model)
@@ -324,12 +304,9 @@ def setup_proto_hybrid(model, geo_filter_threshold=0.7, alpha_proto=0.7, alpha_s
     return proto_entropy_enhanced.setup_proto_entropy_enhanced(
         model,
         lr=cfg_optim.LR,
-        use_sam=False,
         alpha_proto=alpha_proto,
         alpha_softmax=alpha_softmax,
-        use_entropy_filter=True,
         entropy_margin_scale=0.4,
-        use_geometric_filter=True,
         geo_filter_threshold=geo_filter_threshold,
         adaptation_mode='batchnorm_addon',
         steps=cfg_optim.STEPS
@@ -339,17 +316,14 @@ def setup_proto_hybrid(model, geo_filter_threshold=0.7, alpha_proto=0.7, alpha_s
 def setup_proto_samplewise_adaptive(
         model, geo_filter_threshold=0.8, delta0=0.25, top_k=3,
         component_gradient_normalization=False,
-        adaptive_controller='absolute_distance'):
-    """Set up label-free samplewise adaptive ProtoTTA+."""
+        adaptive_controller='absolute_consistency_router'):
+    """Set up label-free samplewise adaptive ProtoTTA."""
     return proto_entropy_enhanced.setup_proto_entropy_enhanced(
         model,
         lr=cfg_optim.LR,
-        use_sam=False,
         alpha_proto=0.7,
         alpha_softmax=0.3,
-        use_entropy_filter=True,
         entropy_margin_scale=0.4,
-        use_geometric_filter=True,
         geo_filter_threshold=geo_filter_threshold,
         adaptation_mode='batchnorm_addon',
         steps=cfg_optim.STEPS,
@@ -690,7 +664,7 @@ def evaluate_single_combination(model_path, corruption_type, severity,
                     'component_gradient_normalization', False
                 ),
                 adaptive_controller=mode_config.get(
-                    'adaptive_controller', 'absolute_distance'
+                    'adaptive_controller', 'absolute_consistency_router'
                 ),
             )
         elif mode_name == 'SAR':
@@ -1390,18 +1364,13 @@ def main():
                         for config in modes.values()
                     ),
                     'formula': (
-                        'absolute_distance: clip(mean(abs(top_k_target_i'
-                        '-0.5))/delta0,0,1); relative_margin: positive '
+                        'activation margin: clip(mean(abs(top_k_target_i'
+                        '-0.5))/delta0,0,1); relative evidence: positive '
                         'prototype class margin and output probability margin '
                         'are normalized by their winning scores, then lambda '
-                        'is their relative evidence ratio; teacher_median: '
-                        'relative-margin lambda with frozen-teacher stability '
-                        'and cumulative reliable-batch median fallback; '
-                        'teacher_batch_median: use that adaptive median for '
-                        'all reliable samples in the batch; coverage_router: '
-                        'non-EMA batch choice between native activation and '
-                        'relative-evidence controllers using gradient '
-                        'consistency and reliable-coverage guard'
+                        'is their relative evidence ratio; router: batch '
+                        'choice between the two estimates using gradient '
+                        'consistency (absolute floor) and the coverage guard'
                     ),
                     'delta0': args.adaptive_delta0,
                     'top_k': args.adaptive_top_k,
@@ -1425,7 +1394,7 @@ def main():
                 },
                 'protocol': {
                     'episodic': False,
-                    'continual_within_corruption': True,
+                    'adapt_across_batches_within_corruption': True,
                     'reset_boundary': 'fresh checkpoint per corruption and method',
                     'shuffle': args.stream_order == 'seeded_random',
                     'stream_order': args.stream_order,

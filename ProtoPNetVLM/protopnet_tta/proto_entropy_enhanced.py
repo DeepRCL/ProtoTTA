@@ -1,22 +1,14 @@
 """
-Enhanced Prototype-aware Entropy Minimization (ProtoEntropy++) for ProtoPNet.
+Prototype-aware entropy minimization for ProtoPNet.
 
-Improvements over base ProtoEntropy:
-1. SAR-style entropy filtering (reliable sample selection)
-2. Optional Sharpness-Aware Minimization (SAM) optimizer
-3. Hybrid loss: binary proto entropy + softmax entropy blend
-4. Adaptive geometric threshold based on batch statistics
-5. EMA model updates for stability
-
-Usage:
-    # Create enhanced ProtoEntropy with SAM
-    model = setup_proto_entropy_enhanced(model, use_sam=True)
+ProtoEntropyEnhanced blends the binary entropy of the predicted-class prototype
+similarities with output entropy using a fixed weight (mode ProtoHybrid).
+SamplewiseAdaptiveProtoEntropy sets the weight per sample with the label-free
+controller (router, single estimates, mean of the two).
 """
 
-from copy import deepcopy
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import math
 
 
@@ -25,162 +17,38 @@ def softmax_entropy(x: torch.Tensor) -> torch.Tensor:
     return -(x.softmax(1) * x.log_softmax(1)).sum(1)
 
 
-def copy_model_and_optimizer(model, optimizer):
-    """Copy the model and optimizer states for reset capability."""
-    model_state = deepcopy(model.state_dict())
-    optimizer_state = deepcopy(optimizer.state_dict()) if optimizer else None
-    return model_state, optimizer_state
-
-
-class SAM(torch.optim.Optimizer):
-    """Sharpness-Aware Minimization optimizer wrapper.
-
-    Seeks flatter minima that generalize better, especially useful for blur corruptions.
-    """
-    def __init__(self, params, base_optimizer, rho=0.05, adaptive=False, **kwargs):
-        assert rho >= 0.0, f"Invalid rho, should be non-negative: {rho}"
-
-        defaults = dict(rho=rho, adaptive=adaptive, **kwargs)
-        super(SAM, self).__init__(params, defaults)
-
-        self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
-        self.param_groups = self.base_optimizer.param_groups
-        self.defaults.update(self.base_optimizer.defaults)
-
-    @torch.no_grad()
-    def first_step(self, zero_grad=False):
-        """Compute epsilon (perturbation) and move to w + epsilon."""
-        grad_norm = self._grad_norm()
-        for group in self.param_groups:
-            scale = group["rho"] / (grad_norm + 1e-12)
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                self.state[p]["old_p"] = p.data.clone()
-                e_w = (torch.pow(p, 2) if group["adaptive"] else 1.0) * p.grad * scale.to(p)
-                p.add_(e_w)  # Move to w + epsilon
-        if zero_grad:
-            self.zero_grad()
-
-    @torch.no_grad()
-    def second_step(self, zero_grad=False):
-        """Restore original weights and apply gradient update."""
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                p.data = self.state[p]["old_p"]  # Restore original weights
-        self.base_optimizer.step()  # Apply gradient at original position
-        if zero_grad:
-            self.zero_grad()
-
-    @torch.no_grad()
-    def step(self, closure=None):
-        """Standard step (for compatibility)."""
-        assert closure is not None, "SAM requires closure for step()"
-        closure = torch.enable_grad()(closure)
-        self.first_step(zero_grad=True)
-        closure()
-        self.second_step()
-
-    def _grad_norm(self):
-        shared_device = self.param_groups[0]["params"][0].device
-        norm = torch.norm(
-            torch.stack([
-                ((torch.abs(p) if group["adaptive"] else 1.0) * p.grad).norm(p=2).to(shared_device)
-                for group in self.param_groups for p in group["params"]
-                if p.grad is not None
-            ]),
-            p=2
-        )
-        return norm
-
-    def load_state_dict(self, state_dict):
-        super().load_state_dict(state_dict)
-        self.base_optimizer.param_groups = self.param_groups
-
-
 class ProtoEntropyEnhanced(nn.Module):
-    """Enhanced Prototype-aware entropy minimization with SAR-style improvements.
+    """Prototype-aware entropy minimization with a fixed prototype weight.
 
-    Key improvements:
-    1. Entropy filtering (SAR-style) - only adapt on reliable samples
-    2. SAM optimizer support - sharpness-aware for better blur robustness
-    3. Hybrid loss - blend of binary proto entropy and softmax entropy
-    4. Adaptive thresholds - adjust filtering based on batch statistics
-    5. EMA updates - exponential moving average for stability
+    The loss blends the binary entropy of the predicted-class prototype
+    similarities (weight alpha_proto) with the output entropy (weight
+    alpha_softmax) over the samples that pass the entropy and geometric
+    reliability filters.
     """
 
-    def __init__(self, model, optimizer, steps=1, episodic=False,
+    def __init__(self, model, optimizer, steps=1,
                  # Loss weights
-                 alpha_proto=1.0, alpha_softmax=0.0, alpha_separation=0.0,
+                 alpha_proto=1.0, alpha_softmax=0.0,
                  # Filtering
-                 use_entropy_filter=True, entropy_margin_scale=0.4,
-                 use_geometric_filter=False, geo_filter_threshold=0.3,
-                 use_adaptive_threshold=False,
-                 # Prototype settings
-                 use_prototype_importance=False,
-                 use_confidence_weighting=False,
-                 adapt_all_prototypes=False,
-                 # SAM settings
-                 use_sam=False,
-                 # EMA settings
-                 use_ema=False, ema_alpha=0.999,
-                 # Reset settings
-                 reset_mode=None, reset_frequency=10,
-                 # SAR-style recovery
-                 use_model_recovery=False, recovery_threshold=0.2):
+                 entropy_margin_scale=0.4,
+                 geo_filter_threshold=0.3):
         super().__init__()
         self.model = model
         self.optimizer = optimizer
         self.steps = steps
         assert steps > 0, "ProtoEntropyEnhanced requires >= 1 step(s)"
-        self.episodic = episodic
 
         # Loss weights
         self.alpha_proto = alpha_proto  # Weight for binary prototype entropy
-        self.alpha_softmax = alpha_softmax  # Weight for softmax entropy (SAR-style)
-        self.alpha_separation = alpha_separation  # Weight for pushing non-target protos
+        self.alpha_softmax = alpha_softmax  # Weight for softmax entropy
         # Subclasses that calculate a per-sample lambda set this to True.
         # The fixed-lambda path uses it only to emit a compressed audit record;
         # it does not participate in the loss or gradient computation.
         self.samplewise_adaptive_lambda = False
 
         # Filtering settings
-        self.use_entropy_filter = use_entropy_filter  # SAR-style entropy filtering
-        self.entropy_margin_scale = entropy_margin_scale  # 0.4 * log(num_classes) typical
-        self.use_geometric_filter = use_geometric_filter
+        self.entropy_margin_scale = entropy_margin_scale  # 0.4 * log(num_classes)
         self.geo_filter_threshold = geo_filter_threshold
-        self.use_adaptive_threshold = use_adaptive_threshold
-
-        # Prototype settings
-        self.use_prototype_importance = use_prototype_importance
-        self.use_confidence_weighting = use_confidence_weighting
-        self.adapt_all_prototypes = adapt_all_prototypes
-
-        # SAM settings
-        self.use_sam = use_sam
-
-        # EMA settings
-        self.use_ema = use_ema
-        self.ema_alpha = ema_alpha
-        self.ema_state = None
-
-        # Reset settings
-        if reset_mode is None:
-            self.reset_mode = 'episodic' if episodic else 'none'
-        else:
-            self.reset_mode = reset_mode
-        self.reset_frequency = reset_frequency
-
-        # SAR-style model recovery
-        self.use_model_recovery = use_model_recovery
-        self.recovery_threshold = recovery_threshold
-        self.ema_loss = None  # Moving average of loss for recovery
-
-        # Save model/optimizer state for reset
-        self.model_state, self.optimizer_state = \
-            copy_model_and_optimizer(self.model, self.optimizer)
 
         # Tracking
         self.batch_count = 0
@@ -190,7 +58,6 @@ class ProtoEntropyEnhanced(nn.Module):
             'filtered_by_entropy': 0,
             'filtered_by_geo': 0,
             'total_updates': 0,
-            'model_resets': 0,
         }
         self.selected_prototype_weight_sum = 0.0
         self.selected_prototype_weight_count = 0
@@ -203,9 +70,6 @@ class ProtoEntropyEnhanced(nn.Module):
         }
 
     def forward(self, x):
-        if self.reset_mode == 'episodic':
-            self.reset()
-
         batch_size = x.size(0)
         self.adaptation_stats['total_samples'] += batch_size
 
@@ -213,14 +77,6 @@ class ProtoEntropyEnhanced(nn.Module):
             outputs = self.forward_and_adapt(x)
 
         self.batch_count += 1
-
-        # Handle periodic reset
-        if self.reset_mode == 'periodic' and self.batch_count % self.reset_frequency == 0:
-            self.reset()
-
-        # EMA update
-        if self.use_ema:
-            self._apply_ema_update()
 
         return outputs
 
@@ -234,116 +90,9 @@ class ProtoEntropyEnhanced(nn.Module):
             last_layer = self.model.last_layer
         return proto_class_identity, last_layer
 
-    def _apply_ema_update(self):
-        """Apply exponential moving average to model parameters."""
-        if self.ema_state is None:
-            self.ema_state = deepcopy(self.model.state_dict())
-        else:
-            current_state = self.model.state_dict()
-            for key in self.ema_state:
-                if current_state[key].dtype in [torch.float32, torch.float16, torch.bfloat16]:
-                    self.ema_state[key] = (self.ema_alpha * self.ema_state[key] +
-                                          (1 - self.ema_alpha) * current_state[key])
-            self.model.load_state_dict(self.ema_state, strict=True)
-
-    def _update_ema_loss(self, loss_value):
-        """Update EMA of loss for model recovery."""
-        if self.ema_loss is None:
-            self.ema_loss = loss_value
-        else:
-            self.ema_loss = 0.9 * self.ema_loss + 0.1 * loss_value
-
-    def _check_model_recovery(self):
-        """Check if model should be reset (SAR-style recovery)."""
-        if self.use_model_recovery and self.ema_loss is not None:
-            if self.ema_loss < self.recovery_threshold:
-                print(f"EMA loss {self.ema_loss:.3f} < {self.recovery_threshold}, resetting model")
-                self.reset()
-                self.adaptation_stats['model_resets'] += 1
-                return True
-        return False
-
     @torch.enable_grad()
     def forward_and_adapt(self, x):
-        """Forward pass with enhanced prototype-aware entropy minimization.
-
-        Improvements:
-        1. SAR-style entropy filtering
-        2. Optional SAM double-pass
-        3. Hybrid loss (proto + softmax entropy)
-        4. Adaptive thresholds
-        """
-        if self.use_sam:
-            return self._forward_and_adapt_sam(x)
-        else:
-            return self._forward_and_adapt_standard(x)
-
-    def _forward_and_adapt_sam(self, x):
-        """Forward with Sharpness-Aware Minimization (double pass)."""
-        # First forward pass
-        self.optimizer.zero_grad()
-        outputs = self.model(x)
-
-        if isinstance(outputs, tuple) and len(outputs) >= 2:
-            logits, min_distances = outputs[0], outputs[1]
-        else:
-            logits = outputs
-            min_distances = None
-
-        if min_distances is None:
-            # Fallback to simple softmax entropy
-            loss = softmax_entropy(logits).mean()
-            loss.backward()
-            self.optimizer.first_step(zero_grad=True)
-
-            outputs_2 = self.model(x)
-            logits_2 = outputs_2[0] if isinstance(outputs_2, tuple) else outputs_2
-            loss_2 = softmax_entropy(logits_2).mean()
-            loss_2.backward()
-            self.optimizer.second_step(zero_grad=True)
-            return outputs
-
-        # Compute loss at current weights
-        loss_1, reliable_mask = self._compute_loss(logits, min_distances, return_mask=True)
-
-        if loss_1.item() == 0 or reliable_mask.sum() == 0:
-            return outputs
-
-        loss_1.backward()
-
-        # SAM first step: move to w + epsilon
-        self.optimizer.first_step(zero_grad=True)
-
-        # Second forward pass at perturbed weights
-        outputs_2 = self.model(x)
-        if isinstance(outputs_2, tuple) and len(outputs_2) >= 2:
-            logits_2, min_distances_2 = outputs_2[0], outputs_2[1]
-        else:
-            logits_2 = outputs_2
-            min_distances_2 = None
-
-        # Re-compute loss at perturbed weights (use same mask for consistency)
-        if min_distances_2 is not None:
-            loss_2, _ = self._compute_loss(logits_2, min_distances_2, return_mask=True, cached_mask=reliable_mask)
-        else:
-            loss_2 = softmax_entropy(logits_2).mean()
-
-        if loss_2.item() > 0:
-            loss_2.backward()
-            self.optimizer.second_step(zero_grad=True)
-
-            # Track adapted samples
-            self.adaptation_stats['adapted_samples'] += int(reliable_mask.sum().item())
-            self.adaptation_stats['total_updates'] += 1
-
-            # Update EMA loss for recovery
-            self._update_ema_loss(loss_2.item())
-            self._check_model_recovery()
-
-        return outputs
-
-    def _forward_and_adapt_standard(self, x):
-        """Standard single-pass forward and adapt."""
+        """Single forward pass and one update on the reliable samples."""
         outputs = self.model(x)
 
         if isinstance(outputs, tuple) and len(outputs) >= 2:
@@ -360,7 +109,7 @@ class ProtoEntropyEnhanced(nn.Module):
             self.optimizer.zero_grad()
             return outputs
 
-        loss, reliable_mask = self._compute_loss(logits, min_distances, return_mask=True)
+        loss, reliable_mask = self._compute_loss(logits, min_distances)
 
         if loss.item() > 0 and reliable_mask.sum() > 0:
             loss.backward()
@@ -373,12 +122,12 @@ class ProtoEntropyEnhanced(nn.Module):
 
         return outputs
 
-    def _compute_loss(self, logits, min_distances, return_mask=False, cached_mask=None):
-        """Compute the hybrid loss with filtering.
+    def _compute_loss(self, logits, min_distances):
+        """Compute the fixed-weight loss with filtering.
 
         Returns:
             loss: Combined loss value
-            reliable_mask: (optional) Mask of reliable samples
+            reliable_mask: Mask of reliable samples
         """
         device = logits.device
         batch_size = logits.shape[0]
@@ -396,55 +145,35 @@ class ProtoEntropyEnhanced(nn.Module):
             proto_identities = proto_class_identity.argmax(dim=1).to(device)  # [P]
 
         # ============ FILTERING ============
-        if cached_mask is not None:
-            reliable_mask = cached_mask
-        else:
-            reliable_mask = torch.ones(batch_size, device=device)
+        reliable_mask = torch.ones(batch_size, device=device)
 
-            # 1. Entropy filtering (SAR-style)
-            if self.use_entropy_filter:
-                margin_e0 = self.entropy_margin_scale * math.log(num_classes)
-                entropy = softmax_entropy(logits)
-                entropy_mask = (entropy < margin_e0).float()
-                reliable_mask = reliable_mask * entropy_mask
-                self.adaptation_stats['filtered_by_entropy'] += int((1 - entropy_mask).sum().item())
+        # 1. Entropy filtering
+        margin_e0 = self.entropy_margin_scale * math.log(num_classes)
+        entropy = softmax_entropy(logits)
+        entropy_mask = (entropy < margin_e0).float()
+        reliable_mask = reliable_mask * entropy_mask
+        self.adaptation_stats['filtered_by_entropy'] += int((1 - entropy_mask).sum().item())
 
-            # 2. Geometric filtering
-            if self.use_geometric_filter:
-                max_sim_per_sample = similarities.max(dim=1)[0]  # [B]
+        # 2. Geometric filtering
+        max_sim_per_sample = similarities.max(dim=1)[0]  # [B]
+        geo_mask = (max_sim_per_sample > self.geo_filter_threshold).float()
 
-                # Adaptive threshold based on batch statistics
-                if self.use_adaptive_threshold:
-                    batch_mean = max_sim_per_sample.mean()
-                    batch_std = max_sim_per_sample.std()
-                    adaptive_thresh = max(0.1, batch_mean - batch_std)  # At least 0.1
-                    geo_mask = (max_sim_per_sample > adaptive_thresh).float()
-                else:
-                    geo_mask = (max_sim_per_sample > self.geo_filter_threshold).float()
+        reliable_mask = reliable_mask * geo_mask
+        self.adaptation_stats['filtered_by_geo'] += int((1 - geo_mask).sum().item())
 
-                reliable_mask = reliable_mask * geo_mask
-                self.adaptation_stats['filtered_by_geo'] += int((1 - geo_mask).sum().item())
-
-                # Track geo stats
-                self.geo_filter_stats['total_samples'] += batch_size
-                self.geo_filter_stats['filtered_samples'] += int((1 - geo_mask).sum().item())
+        # Track geo stats
+        self.geo_filter_stats['total_samples'] += batch_size
+        self.geo_filter_stats['filtered_samples'] += int((1 - geo_mask).sum().item())
 
         if reliable_mask.sum() == 0:
-            if return_mask:
-                return torch.tensor(0.0, device=device), reliable_mask
-            return torch.tensor(0.0, device=device)
+            return torch.tensor(0.0, device=device), reliable_mask
 
         sample_weights = reliable_mask.unsqueeze(1)  # [B, 1]
 
         # ============ LOSS COMPUTATION ============
 
-        # Create target/non-target masks
-        if self.adapt_all_prototypes:
-            num_prototypes = proto_identities.shape[0]
-            target_mask = torch.ones(batch_size, num_prototypes, device=device)
-        else:
-            target_mask = (proto_identities.unsqueeze(0) == pred_class.unsqueeze(1)).float()
-        nontarget_mask = 1.0 - target_mask
+        # Predicted-class prototypes
+        target_mask = (proto_identities.unsqueeze(0) == pred_class.unsqueeze(1)).float()
 
         # Diagnostic only: mean absolute classifier weight of the predicted-class
         # prototypes selected for reliable samples. This does not affect the loss.
@@ -473,52 +202,21 @@ class ProtoEntropyEnhanced(nn.Module):
             entropy = -(proto_probs * torch.log(proto_probs) +
                        (1 - proto_probs) * torch.log(1 - proto_probs))
 
-            # Apply importance weighting
-            if self.use_prototype_importance:
-                class_weights = last_layer.weight[pred_class]  # [B, P]
-                importance_weights = torch.abs(class_weights) * target_mask
-                importance_weights = importance_weights / (importance_weights.sum(dim=1, keepdim=True) + 1e-8)
-                weighted_entropy = entropy * importance_weights * sample_weights
-                loss_per_sample = weighted_entropy.sum(dim=1)
-            else:
-                masked_entropy = entropy * target_mask * sample_weights
-                loss_per_sample = masked_entropy.sum(dim=1) / (target_mask.sum(dim=1) + 1e-8)
+            # Uniform mean over the predicted-class prototypes
+            masked_entropy = entropy * target_mask * sample_weights
+            loss_per_sample = masked_entropy.sum(dim=1) / (target_mask.sum(dim=1) + 1e-8)
 
-            # Confidence weighting
-            if self.use_confidence_weighting:
-                with torch.no_grad():
-                    confidence = logits.softmax(dim=1).max(dim=1)[0]
-                loss_proto = (loss_per_sample * confidence * reliable_mask).sum() / (reliable_mask.sum() + 1e-8)
-            else:
-                loss_proto = (loss_per_sample * reliable_mask).sum() / (reliable_mask.sum() + 1e-8)
+            loss_proto = (loss_per_sample * reliable_mask).sum() / (reliable_mask.sum() + 1e-8)
 
             loss = loss + self.alpha_proto * loss_proto
 
-        # ========== Part B: Softmax Entropy (SAR-style) ==========
+        # ========== Part B: Softmax Entropy ==========
         if self.alpha_softmax > 0:
             softmax_ent = softmax_entropy(logits)  # [B]
             loss_softmax = (softmax_ent * reliable_mask).sum() / (reliable_mask.sum() + 1e-8)
             loss = loss + self.alpha_softmax * loss_softmax
 
-        # ========== Part C: Separation Loss ==========
-        if self.alpha_separation > 0:
-            nontarget_sims = similarities * nontarget_mask
-            nontarget_sims = torch.clamp(nontarget_sims, min=0.0, max=1.0)
-            eps = 1e-6
-            separation_loss = -torch.log(1 - nontarget_sims + eps) * nontarget_mask * sample_weights
-            loss_sep_per_sample = separation_loss.sum(dim=1) / (nontarget_mask.sum(dim=1) + 1e-8)
-            loss_separation = (loss_sep_per_sample * reliable_mask).sum() / (reliable_mask.sum() + 1e-8)
-            loss = loss + self.alpha_separation * loss_separation
-
-        if return_mask:
-            return loss, reliable_mask
-        return loss
-
-    def reset(self):
-        """Reset model parameters to pretrained state."""
-        self.model.load_state_dict(self.model_state, strict=True)
-        self.ema_state = None
-        self.ema_loss = None
+        return loss, reliable_mask
 
     def get_stats(self):
         """Get adaptation statistics."""
@@ -560,8 +258,7 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
 
     def __init__(self, *args, adaptive_delta0=0.25, adaptive_top_k=3,
                  component_gradient_normalization=False,
-                 adaptive_controller='absolute_distance',
-                 controller_teacher=None, **kwargs):
+                 adaptive_controller='absolute_consistency_router', **kwargs):
         super().__init__(*args, **kwargs)
         self.samplewise_adaptive_lambda = True
         if adaptive_delta0 <= 0:
@@ -569,28 +266,17 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
         if adaptive_top_k <= 0:
             raise ValueError('adaptive_top_k must be positive')
         if adaptive_controller not in {
-                'absolute_distance', 'relative_margin',
-                'teacher_median', 'teacher_batch_median',
-                'coverage_router', 'absolute_consistency_router',
-                'ratio_only_router', 'absolute_only_router',
-                'forced_relative', 'forced_native', 'fixed_lambda_0.2',
-                'mean_act_rel'}:
+                'absolute_consistency_router', 'absolute_only_router',
+                'forced_relative', 'forced_native', 'mean_act_rel'}:
             raise ValueError(
-                'adaptive_controller must be absolute_distance or '
-                'relative_margin, teacher_median, teacher_batch_median, '
-                'coverage_router, absolute_consistency_router, '
-                'ratio_only_router, absolute_only_router, '
-                'forced_relative, forced_native, or fixed_lambda_0.2'
+                'adaptive_controller must be absolute_consistency_router, '
+                'absolute_only_router, forced_relative, forced_native, or '
+                'mean_act_rel'
             )
         self.adaptive_delta0 = adaptive_delta0
         self.adaptive_top_k = adaptive_top_k
         self.adaptive_controller = adaptive_controller
         self.component_gradient_normalization = component_gradient_normalization
-        self.controller_teacher = controller_teacher
-        if self.controller_teacher is not None:
-            self.controller_teacher.eval()
-            self.controller_teacher.requires_grad_(False)
-        self._controller_teacher_outputs = None
         self.lambda_values = []
         self.proto_loss_sum = 0.0
         self.output_loss_sum = 0.0
@@ -604,12 +290,6 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
         self.output_margin_values = []
         self.proto_output_agreement_values = []
         self._last_controller_diagnostics = None
-        self.raw_lambda_values = []
-        self.controller_center_values = []
-        self.controller_center_weighted_sum = 0.0
-        self.controller_center_weight = 0
-        self.controller_fallback_count = 0
-        self.controller_reliable_count = 0
         self.coverage_router_native_batches = 0
         self.coverage_router_total_batches = 0
         self.coverage_router_q_proto_values = []
@@ -629,76 +309,6 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
             'accepted_samples': [],
         }
         self.prototype_score_values = []
-
-    @torch.enable_grad()
-    def forward_and_adapt(self, x):
-        if self.adaptive_controller not in {
-                'teacher_median', 'teacher_batch_median'}:
-            return super().forward_and_adapt(x)
-        if self.controller_teacher is None:
-            raise RuntimeError(
-                'teacher_median requires a frozen controller teacher'
-            )
-        with torch.no_grad():
-            self._controller_teacher_outputs = self.controller_teacher(x)
-        try:
-            return super().forward_and_adapt(x)
-        finally:
-            self._controller_teacher_outputs = None
-
-    def _teacher_stability_mask(self, student_pred_class):
-        with torch.no_grad():
-            teacher_outputs = self._controller_teacher_outputs
-            if isinstance(teacher_outputs, tuple):
-                teacher_logits = teacher_outputs[0]
-            else:
-                teacher_logits = teacher_outputs
-            teacher_output_prediction = teacher_logits.argmax(dim=1)
-            return (
-                (teacher_output_prediction == student_pred_class)
-            ).detach()
-
-    def _apply_teacher_median_controller(
-            self, raw_lambdas, reliable_mask, stable_mask,
-            use_batch_center_for_all=False):
-        with torch.no_grad():
-            reliable = reliable_mask.bool()
-            stable_reliable = reliable & stable_mask.bool()
-            center_candidates = stable_reliable
-            if not center_candidates.any():
-                center_candidates = reliable
-            batch_center = torch.quantile(
-                raw_lambdas[center_candidates], 0.5
-            )
-            center_weight = int(reliable.sum().item())
-            self.controller_center_weighted_sum += (
-                float(batch_center.item()) * center_weight
-            )
-            self.controller_center_weight += center_weight
-            running_center = (
-                self.controller_center_weighted_sum
-                / max(self.controller_center_weight, 1)
-            )
-            if use_batch_center_for_all:
-                final_lambdas = torch.full_like(
-                    raw_lambdas, running_center
-                )
-            else:
-                final_lambdas = torch.where(
-                    stable_mask.bool(),
-                    raw_lambdas,
-                    torch.full_like(raw_lambdas, running_center),
-                )
-
-            self.raw_lambda_values.extend(
-                raw_lambdas[reliable].cpu().tolist()
-            )
-            self.controller_center_values.append(running_center)
-            self.controller_fallback_count += int(
-                (reliable & ~stable_mask.bool()).sum().item()
-            )
-            self.controller_reliable_count += center_weight
-            return final_lambdas.detach()
 
     def _optimizer_parameters(self):
         return [
@@ -831,18 +441,7 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
             and (reliable_fraction <= 0.40).item()
         )
 
-        if routing_mode == 'coverage_router':
-            consistency_native = bool(
-                (q_proto >= 2.0 * torch.maximum(
-                    q_out, torch.tensor(1e-8, device=logits.device)
-                )).item()
-            )
-            use_native = consistency_native or coverage_native
-        elif routing_mode == 'ratio_only_router':
-            consistency_native = bool((q_proto >= 2.0 * q_out).item())
-            use_native = consistency_native
-            coverage_native = False
-        elif routing_mode == 'absolute_only_router':
+        if routing_mode == 'absolute_only_router':
             consistency_native = bool(
                 (q_proto >= 2.0 * q_out).item()
                 and (q_proto >= 0.25).item()
@@ -858,15 +457,13 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
         elif routing_mode == 'forced_native':
             consistency_native = False
             use_native = True
-        elif routing_mode in {'forced_relative', 'fixed_lambda_0.2', 'mean_act_rel'}:
+        elif routing_mode in {'forced_relative', 'mean_act_rel'}:
             consistency_native = False
             use_native = False
         else:
             raise ValueError(f'Unsupported routing mode: {routing_mode}')
 
-        if routing_mode == 'fixed_lambda_0.2':
-            selected_lambdas = torch.full_like(relative_lambdas, 0.2)
-        elif routing_mode == 'mean_act_rel':
+        if routing_mode == 'mean_act_rel':
             # Simplest label-free combination: sample-wise average of both estimates.
             selected_lambdas = 0.5 * (native_lambdas + relative_lambdas)
         else:
@@ -902,17 +499,6 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
             'mean_output_evidence': mean_output_evidence.detach(),
         }
         return selected_lambdas
-
-    def _coverage_router_lambdas(
-            self, logits, similarities, pred_class, proto_identities,
-            target_mask, reliable_mask, proto_loss_per_sample,
-            output_loss_per_sample):
-        """Backward-compatible entry point for the original ratio router."""
-        return self._routed_lambdas(
-            logits, similarities, pred_class, proto_identities,
-            target_mask, reliable_mask, proto_loss_per_sample,
-            output_loss_per_sample, 'coverage_router'
-        )
 
     def _controller_lambdas(self, similarities, target_mask):
         """Calculate detached lambda_i from top target-prototype activations."""
@@ -1060,75 +646,53 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
             return raw_similarities / 9.0
         return raw_similarities
 
-    def _compute_loss(self, logits, min_distances, return_mask=False, cached_mask=None):
+    def _compute_loss(self, logits, min_distances):
         """Compute samplewise lambda_i interpolation after per-sample losses."""
         device = logits.device
         batch_size = logits.shape[0]
         num_classes = logits.shape[1]
 
         similarities = self._native_normalized_similarities(min_distances)
-        if cached_mask is None:
-            detached_scores = similarities.detach()
-            self.prototype_score_values.extend([
-                float(detached_scores.min().item()),
-                float(detached_scores.max().item()),
-            ])
+        detached_scores = similarities.detach()
+        self.prototype_score_values.extend([
+            float(detached_scores.min().item()),
+            float(detached_scores.max().item()),
+        ])
         proto_class_identity, last_layer = self._get_model_components()
 
         with torch.no_grad():
             pred_class = logits.argmax(dim=1)
             proto_identities = proto_class_identity.argmax(dim=1).to(device)
 
-        if cached_mask is not None:
-            reliable_mask = cached_mask
-        else:
-            reliable_mask = torch.ones(batch_size, device=device)
-            if self.use_entropy_filter:
-                margin_e0 = self.entropy_margin_scale * math.log(num_classes)
-                entropy_mask = (
-                    softmax_entropy(logits) < margin_e0
-                ).float()
-                reliable_mask = reliable_mask * entropy_mask
-                self.adaptation_stats['filtered_by_entropy'] += int(
-                    (1 - entropy_mask).sum().item()
-                )
-            if self.use_geometric_filter:
-                max_sim_per_sample = similarities.max(dim=1)[0]
-                if self.use_adaptive_threshold:
-                    adaptive_thresh = max(
-                        0.1,
-                        max_sim_per_sample.mean() - max_sim_per_sample.std(),
-                    )
-                    geo_mask = (max_sim_per_sample > adaptive_thresh).float()
-                else:
-                    geo_mask = (
-                        max_sim_per_sample > self.geo_filter_threshold
-                    ).float()
-                reliable_mask = reliable_mask * geo_mask
-                self.adaptation_stats['filtered_by_geo'] += int(
-                    (1 - geo_mask).sum().item()
-                )
-                self.geo_filter_stats['total_samples'] += batch_size
-                self.geo_filter_stats['filtered_samples'] += int(
-                    (1 - geo_mask).sum().item()
-                )
+        reliable_mask = torch.ones(batch_size, device=device)
+        margin_e0 = self.entropy_margin_scale * math.log(num_classes)
+        entropy_mask = (
+            softmax_entropy(logits) < margin_e0
+        ).float()
+        reliable_mask = reliable_mask * entropy_mask
+        self.adaptation_stats['filtered_by_entropy'] += int(
+            (1 - entropy_mask).sum().item()
+        )
+        max_sim_per_sample = similarities.max(dim=1)[0]
+        geo_mask = (
+            max_sim_per_sample > self.geo_filter_threshold
+        ).float()
+        reliable_mask = reliable_mask * geo_mask
+        self.adaptation_stats['filtered_by_geo'] += int(
+            (1 - geo_mask).sum().item()
+        )
+        self.geo_filter_stats['total_samples'] += batch_size
+        self.geo_filter_stats['filtered_samples'] += int(
+            (1 - geo_mask).sum().item()
+        )
 
         if reliable_mask.sum() == 0:
             zero_loss = torch.tensor(0.0, device=device)
-            if return_mask:
-                return zero_loss, reliable_mask
-            return zero_loss
+            return zero_loss, reliable_mask
 
-        if self.adapt_all_prototypes:
-            target_mask = torch.ones(
-                batch_size,
-                proto_identities.shape[0],
-                device=device,
-            )
-        else:
-            target_mask = (
-                proto_identities.unsqueeze(0) == pred_class.unsqueeze(1)
-            ).float()
+        target_mask = (
+            proto_identities.unsqueeze(0) == pred_class.unsqueeze(1)
+        ).float()
 
         eps = 1e-6
         proto_probs = torch.clamp(
@@ -1140,73 +704,26 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
             proto_probs * torch.log(proto_probs)
             + (1 - proto_probs) * torch.log(1 - proto_probs)
         )
-        if self.use_prototype_importance:
-            class_weights = last_layer.weight[pred_class]
-            importance_weights = torch.abs(class_weights) * target_mask
-            importance_weights = importance_weights / (
-                importance_weights.sum(dim=1, keepdim=True) + 1e-8
-            )
-            proto_loss_per_sample = (
-                proto_entropy * importance_weights
-            ).sum(dim=1)
-        else:
-            proto_loss_per_sample = (
-                (proto_entropy * target_mask).sum(dim=1)
-                / (target_mask.sum(dim=1) + 1e-8)
-            )
+        proto_loss_per_sample = (
+            (proto_entropy * target_mask).sum(dim=1)
+            / (target_mask.sum(dim=1) + 1e-8)
+        )
         output_loss_per_sample = softmax_entropy(logits)
 
-        if self.adaptive_controller in {
-                'coverage_router', 'absolute_consistency_router',
-                'ratio_only_router', 'absolute_only_router',
-                'forced_relative', 'forced_native', 'fixed_lambda_0.2',
-                'mean_act_rel'}:
-            lambdas = self._routed_lambdas(
-                logits,
-                similarities,
-                pred_class,
-                proto_identities,
-                target_mask,
-                reliable_mask,
-                proto_loss_per_sample,
-                output_loss_per_sample,
-                self.adaptive_controller,
-            )
-        elif self.adaptive_controller in {
-                'relative_margin', 'teacher_median',
-                'teacher_batch_median'}:
-            lambdas = self._relative_margin_lambdas(
-                logits,
-                similarities,
-                pred_class,
-                proto_identities,
-            )
-            if self.adaptive_controller in {
-                    'teacher_median', 'teacher_batch_median'}:
-                student_agreement = self._last_controller_diagnostics[
-                    'agreement'
-                ].bool()
-                stable_mask = (
-                    student_agreement
-                    & self._teacher_stability_mask(pred_class)
-                )
-                lambdas = self._apply_teacher_median_controller(
-                    lambdas,
-                    reliable_mask,
-                    stable_mask,
-                    use_batch_center_for_all=(
-                        self.adaptive_controller
-                        == 'teacher_batch_median'
-                    ),
-                )
-        else:
-            lambdas = self._controller_lambdas(similarities, target_mask)
+        lambdas = self._routed_lambdas(
+            logits,
+            similarities,
+            pred_class,
+            proto_identities,
+            target_mask,
+            reliable_mask,
+            proto_loss_per_sample,
+            output_loss_per_sample,
+            self.adaptive_controller,
+        )
 
-        if self.use_confidence_weighting:
-            with torch.no_grad():
-                confidence_weights = logits.softmax(dim=1).max(dim=1)[0]
-        else:
-            confidence_weights = torch.ones(batch_size, device=device)
+        # No confidence weighting on ProtoPNet.
+        confidence_weights = torch.ones(batch_size, device=device)
 
         reliable_count = reliable_mask.sum()
         sample_weights = reliable_mask * confidence_weights
@@ -1253,37 +770,34 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
 
             loss = proto_component + output_component
 
-        if cached_mask is None:
-            with torch.no_grad():
-                reliable = reliable_mask.bool()
-                selected_weights = (
-                    torch.abs(last_layer.weight[pred_class]) * target_mask
-                )
-                mean_weight_per_sample = (
-                    selected_weights.sum(dim=1)
-                    / (target_mask.sum(dim=1) + 1e-8)
-                )
-                self.selected_prototype_weight_sum += float(
-                    mean_weight_per_sample[reliable].sum().item()
-                )
-                self.selected_prototype_weight_count += int(
-                    reliable.sum().item()
-                )
-            self._record_adaptive_diagnostics(
-                lambdas,
-                reliable_mask,
-                proto_loss_per_sample,
-                output_loss_per_sample,
-                confidence_weights,
-                proto_component,
-                output_component,
-                proto_gradient_norm,
-                output_gradient_norm,
+        with torch.no_grad():
+            reliable = reliable_mask.bool()
+            selected_weights = (
+                torch.abs(last_layer.weight[pred_class]) * target_mask
             )
+            mean_weight_per_sample = (
+                selected_weights.sum(dim=1)
+                / (target_mask.sum(dim=1) + 1e-8)
+            )
+            self.selected_prototype_weight_sum += float(
+                mean_weight_per_sample[reliable].sum().item()
+            )
+            self.selected_prototype_weight_count += int(
+                reliable.sum().item()
+            )
+        self._record_adaptive_diagnostics(
+            lambdas,
+            reliable_mask,
+            proto_loss_per_sample,
+            output_loss_per_sample,
+            confidence_weights,
+            proto_component,
+            output_component,
+            proto_gradient_norm,
+            output_gradient_norm,
+        )
 
-        if return_mask:
-            return loss, reliable_mask
-        return loss
+        return loss, reliable_mask
 
     def get_stats(self):
         stats = super().get_stats()
@@ -1302,9 +816,6 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
         )
         agreement_tensor = torch.tensor(
             self.proto_output_agreement_values, dtype=torch.float64
-        )
-        raw_lambda_tensor = torch.tensor(
-            self.raw_lambda_values, dtype=torch.float64
         )
         if lambda_tensor.numel() > 0:
             lambda_quantiles = {
@@ -1351,9 +862,8 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
             }
 
         routed_controllers = {
-            'coverage_router', 'absolute_consistency_router',
-            'ratio_only_router', 'absolute_only_router',
-            'forced_relative', 'forced_native', 'fixed_lambda_0.2',
+            'absolute_consistency_router', 'absolute_only_router',
+            'forced_relative', 'forced_native',
         }
         prototype_score_summary = distribution_summary(
             self.prototype_score_values
@@ -1389,37 +899,6 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
                     'each margin is normalized by its winning score'
                 ),
             },
-            'teacher_median_controller': {
-                'enabled': self.adaptive_controller in {
-                    'teacher_median', 'teacher_batch_median'
-                },
-                'batch_center_for_all_samples': (
-                    self.adaptive_controller == 'teacher_batch_median'
-                ),
-                'mean_raw_lambda': (
-                    float(raw_lambda_tensor.mean().item())
-                    if raw_lambda_tensor.numel() else None
-                ),
-                'final_running_center': (
-                    self.controller_center_values[-1]
-                    if self.controller_center_values else None
-                ),
-                'mean_running_center': (
-                    sum(self.controller_center_values)
-                    / len(self.controller_center_values)
-                    if self.controller_center_values else None
-                ),
-                'fallback_percentage': (
-                    100.0 * self.controller_fallback_count
-                    / self.controller_reliable_count
-                    if self.controller_reliable_count else None
-                ),
-                'definition': (
-                    'keep raw samplewise lambda for stable frozen-teacher '
-                    'assignments; otherwise use the cumulatively weighted '
-                    'reliable-batch median'
-                ),
-            },
             'coverage_router': {
                 'enabled': self.adaptive_controller in routed_controllers,
                 'controller': self.adaptive_controller,
@@ -1452,8 +931,7 @@ class SamplewiseAdaptiveProtoEntropy(ProtoEntropyEnhanced):
                 ),
                 'total_batches': self.coverage_router_total_batches,
                 'definition': (
-                    'non-EMA diagnostics/router; ratio_only_router uses '
-                    'q_proto>=2*q_out; absolute_only_router adds '
+                    'absolute_only_router uses q_proto>=2*q_out and '
                     'q_proto>=0.25; absolute_consistency_router additionally '
                     'uses mean r_o>=0.90 and reliable coverage<=0.40'
                 ),
@@ -1542,7 +1020,7 @@ def collect_params_enhanced(model, adaptation_mode='batchnorm_addon'):
         prefix = ''
 
     # BatchNorm params
-    if 'batchnorm' in adaptation_mode or adaptation_mode == 'all_adapt':
+    if 'batchnorm' in adaptation_mode:
         for nm, m in core.features.named_modules():
             if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.LayerNorm)):
                 for np_name, p in m.named_parameters():
@@ -1558,18 +1036,12 @@ def collect_params_enhanced(model, adaptation_mode='batchnorm_addon'):
                         names.append(f"{prefix}add_on_layers.{nm}.{np_name}")
 
     # Add-on layer params
-    if 'addon' in adaptation_mode or adaptation_mode == 'all_adapt':
+    if 'addon' in adaptation_mode:
         for nm, p in core.add_on_layers.named_parameters():
             param_name = f"{prefix}add_on_layers.{nm}"
             if p.requires_grad and param_name not in names:
                 params.append(p)
                 names.append(param_name)
-
-    # Prototype vectors
-    if 'proto' in adaptation_mode or adaptation_mode == 'all_adapt':
-        if hasattr(core, 'prototype_vectors') and core.prototype_vectors.requires_grad:
-            params.append(core.prototype_vectors)
-            names.append(f"{prefix}prototype_vectors")
 
     return params, names
 
@@ -1584,7 +1056,7 @@ def configure_model_enhanced(model, adaptation_mode='batchnorm_addon'):
     model.train()
     model.requires_grad_(False)
 
-    if 'batchnorm' in adaptation_mode or adaptation_mode == 'all_adapt':
+    if 'batchnorm' in adaptation_mode:
         for m in model.modules():
             if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
                 m.requires_grad_(True)
@@ -1594,60 +1066,32 @@ def configure_model_enhanced(model, adaptation_mode='batchnorm_addon'):
             elif isinstance(m, nn.LayerNorm):
                 m.requires_grad_(True)
 
-    if 'addon' in adaptation_mode or adaptation_mode == 'all_adapt':
+    if 'addon' in adaptation_mode:
         for p in core.add_on_layers.parameters():
             p.requires_grad = True
-
-    if 'proto' in adaptation_mode or adaptation_mode == 'all_adapt':
-        if hasattr(core, 'prototype_vectors'):
-            core.prototype_vectors.requires_grad = True
 
     return model
 
 
 def setup_proto_entropy_enhanced(model,
                                   lr=0.001,
-                                  use_sam=False,
                                   alpha_proto=1.0,
                                   alpha_softmax=0.0,
-                                  use_entropy_filter=True,
                                   entropy_margin_scale=0.4,
-                                  use_geometric_filter=False,
                                   geo_filter_threshold=0.3,
-                                  use_adaptive_threshold=False,
                                   adaptation_mode='batchnorm_addon',
-                                  use_ema=False,
-                                  use_model_recovery=False,
                                   steps=1,
                                   samplewise_adaptive_lambda=False,
                                   adaptive_delta0=0.25,
                                   adaptive_top_k=3,
                                   component_gradient_normalization=False,
-                                  adaptive_controller='absolute_distance'):
+                                  adaptive_controller='absolute_consistency_router'):
     """
-    Set up enhanced ProtoEntropy adaptation.
-
-    Recommended configurations:
-
-    1. ProtoTTA-SAM (best for blur):
-       use_sam=True, alpha_proto=0.5, alpha_softmax=0.5
-
-    2. ProtoTTA-Hybrid (balanced):
-       alpha_proto=0.7, alpha_softmax=0.3, use_entropy_filter=True
-
-    3. ProtoTTA-Adaptive (auto-tuning):
-       use_adaptive_threshold=True, use_ema=True
+    Set up ProtoTTA on ProtoPNet: a fixed prototype weight (alpha_proto) or,
+    with samplewise_adaptive_lambda=True, the label-free per-sample controller.
+    Both use the entropy and geometric reliability filters and Adam.
     """
     model = configure_model_enhanced(model, adaptation_mode=adaptation_mode)
-    controller_teacher = None
-    if (
-            samplewise_adaptive_lambda
-            and adaptive_controller in {
-                'teacher_median', 'teacher_batch_median'
-            }):
-        controller_teacher = deepcopy(model)
-        controller_teacher.eval()
-        controller_teacher.requires_grad_(False)
     params, param_names = collect_params_enhanced(model, adaptation_mode=adaptation_mode)
 
     if not params:
@@ -1655,10 +1099,7 @@ def setup_proto_entropy_enhanced(model,
         return model
 
     # Create optimizer
-    if use_sam:
-        optimizer = SAM(params, torch.optim.SGD, lr=lr, momentum=0.9, rho=0.05)
-    else:
-        optimizer = torch.optim.Adam(params, lr=lr)
+    optimizer = torch.optim.Adam(params, lr=lr)
 
     if samplewise_adaptive_lambda:
         proto_model = SamplewiseAdaptiveProtoEntropy(
@@ -1667,19 +1108,12 @@ def setup_proto_entropy_enhanced(model,
             steps=steps,
             alpha_proto=alpha_proto,
             alpha_softmax=alpha_softmax,
-            use_entropy_filter=use_entropy_filter,
             entropy_margin_scale=entropy_margin_scale,
-            use_geometric_filter=use_geometric_filter,
             geo_filter_threshold=geo_filter_threshold,
-            use_adaptive_threshold=use_adaptive_threshold,
-            use_sam=use_sam,
-            use_ema=use_ema,
-            use_model_recovery=use_model_recovery,
             adaptive_delta0=adaptive_delta0,
             adaptive_top_k=adaptive_top_k,
             component_gradient_normalization=component_gradient_normalization,
             adaptive_controller=adaptive_controller,
-            controller_teacher=controller_teacher,
         )
     else:
         proto_model = ProtoEntropyEnhanced(
@@ -1688,27 +1122,11 @@ def setup_proto_entropy_enhanced(model,
             steps=steps,
             alpha_proto=alpha_proto,
             alpha_softmax=alpha_softmax,
-            use_entropy_filter=use_entropy_filter,
             entropy_margin_scale=entropy_margin_scale,
-            use_geometric_filter=use_geometric_filter,
             geo_filter_threshold=geo_filter_threshold,
-            use_adaptive_threshold=use_adaptive_threshold,
-            use_sam=use_sam,
-            use_ema=use_ema,
-            use_model_recovery=use_model_recovery,
         )
 
-    mode_str = []
-    if use_sam:
-        mode_str.append("SAM")
-    if use_entropy_filter:
-        mode_str.append(f"ent@{entropy_margin_scale}")
-    if use_geometric_filter:
-        mode_str.append(f"geo@{geo_filter_threshold}")
-    if use_adaptive_threshold:
-        mode_str.append("adaptive")
-    if use_ema:
-        mode_str.append("EMA")
+    mode_str = [f"ent@{entropy_margin_scale}", f"geo@{geo_filter_threshold}"]
     if alpha_softmax > 0:
         mode_str.append(f"hybrid({alpha_proto:.1f}:{alpha_softmax:.1f})")
     if samplewise_adaptive_lambda:
@@ -1719,6 +1137,6 @@ def setup_proto_entropy_enhanced(model,
     if component_gradient_normalization:
         mode_str.append("component-gradnorm")
 
-    print(f"ProtoEntropy++ ({'+'.join(mode_str) if mode_str else 'basic'}, {adaptation_mode}, {len(params)} params)")
+    print(f"ProtoEntropy++ ({'+'.join(mode_str)}, {adaptation_mode}, {len(params)} params)")
 
     return proto_model

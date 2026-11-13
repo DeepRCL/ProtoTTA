@@ -101,7 +101,7 @@ class SAR(nn.Module):
         self.reset_constant_em = reset_constant_em  # threshold e_m for model recovery scheme
         self.ema = None  # to record the moving average of model output entropy, as model recovery criteria
 
-        # note: if the model is never reset, like for continual adaptation,
+        # note: if the model is never reset,
         # then skipping the state copy would save memory
         self.model_state, self.optimizer_state = \
             copy_model_and_optimizer(self.model, self.optimizer)

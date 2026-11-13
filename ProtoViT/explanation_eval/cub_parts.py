@@ -45,33 +45,6 @@ def load_keypoints():
     return kp
 
 
-def cell_hits(flat, pts):
-    r, c = divmod(int(flat), GRID)
-    x0, y0 = c * PATCH, r * PATCH
-    cx, cy = x0 + PATCH / 2, y0 + PATCH / 2
-    strict = any(x0 <= px < x0 + PATCH and y0 <= py < y0 + PATCH for _, px, py in pts)
-    near = any(max(abs(px - cx), abs(py - cy)) <= PATCH * 1.5 for _, px, py in pts)  # cell or 8-neighbours
-    return near, strict
-
-
-def sample_metrics(rec, pts):
-    """Share of the card's active sub-patches near an annotated part (near, strict, top-1 prototype);
-    None if the card shows no active sub-patch."""
-    near, strict, top1 = [], [], []
-    for k, proto in enumerate(rec["top"]):
-        for flat, s in zip(proto["loc"], proto["slots"]):
-            if s <= SLOT_ACTIVE:
-                continue
-            n, st = cell_hits(flat, pts)
-            near.append(n)
-            strict.append(st)
-            if k == 0:
-                top1.append(n)
-    if not near or not top1:
-        return None
-    return float(np.mean(near)), float(np.mean(strict)), float(np.mean(top1))
-
-
 def pcaw(rec, W):
     y = rec["label"]
     c = np.array([t["act"] * abs(W[y, t["p"]]) for t in rec["top_any"]])

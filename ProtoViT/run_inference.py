@@ -14,11 +14,7 @@ from preprocess import mean, std
 from noise_utils import get_corrupted_transform
 import tent
 import proto_entropy
-import loss_adapt
-import fisher_proto
 import eata_adapt
-import memo_adapt
-import sar_adapt
 from pathlib import Path
 import numpy as np
 import random
@@ -26,9 +22,6 @@ import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 from collections import defaultdict
-import local_analysis
-from log import create_logger
-import re
 import interpretability_viz
 from prototype_tta_metrics import PrototypeMetricsEvaluator
 from enhanced_prototype_metrics import EnhancedPrototypeMetrics
@@ -208,31 +201,19 @@ def get_adapted_params_from_wrapper(model_wrapper):
 
 
 def setup_proto_entropy(model, use_importance=False, use_confidence=False,
-                        reset_mode=None, reset_frequency=10,
-                        confidence_threshold=0.7, ema_alpha=0.999,
                         use_geometric_filter=False, geo_filter_threshold=0.3,
                         consensus_strategy='max', consensus_ratio=0.5,
                         adaptation_mode='layernorm_only',
-                        use_ensemble_entropy=False,
-                        source_proto_stats=None, alpha_source_kl=0.0,
                         adapt_all_prototypes=False,
                         logit_weight=0.0):
     """Set up Prototype Entropy adaptation (without threshold).
     
     Args:
-        reset_mode: 'episodic', 'periodic', 'confidence', 'hybrid', 'ema', 'none'
-                   If None, infers from cfg.MODEL.EPISODIC
-        reset_frequency: How often to reset in 'periodic'/'hybrid' modes (in BATCHES, not samples)
-        confidence_threshold: Confidence threshold for 'confidence'/'hybrid' modes
-        ema_alpha: EMA decay for 'ema' mode
         use_geometric_filter: Use geometric similarity to filter unreliable samples
         geo_filter_threshold: Minimum similarity to ANY prototype to be considered reliable
-        consensus_strategy: How to aggregate sub-prototypes ('max', 'mean', 'median', 'top_k_mean', 'weighted_mean')
+        consensus_strategy: How to aggregate sub-prototypes ('max', 'mean', 'top_k_mean')
         consensus_ratio: For 'top_k_mean', fraction of sub-prototypes to use
-        adaptation_mode: What parameters to adapt ('layernorm_only', 'layernorm_proto', etc.)
-        use_ensemble_entropy: Treat sub-prototypes as ensemble (compute entropy per sub-proto, then average)
-        source_proto_stats: Pre-computed source prototype statistics
-        alpha_source_kl: Weight for source KL regularization
+        adaptation_mode: What parameters to adapt ('layernorm_only' or 'layernorm_attn_bias')
         adapt_all_prototypes: If True, adapt all prototypes (not just target)
     """
     model = proto_entropy.configure_model(model, adaptation_mode=adaptation_mode)
@@ -245,77 +226,16 @@ def setup_proto_entropy(model, use_importance=False, use_confidence=False,
         model,
         optimizer,
         steps=cfg.OPTIM.STEPS,
-        episodic=cfg.MODEL.EPISODIC,
         use_prototype_importance=use_importance,
         use_confidence_weighting=use_confidence,
-        reset_mode=reset_mode,
-        reset_frequency=reset_frequency,
-        confidence_threshold=confidence_threshold,
-        ema_alpha=ema_alpha,
         use_geometric_filter=use_geometric_filter,
         geo_filter_threshold=geo_filter_threshold,
         consensus_strategy=consensus_strategy,
         consensus_ratio=consensus_ratio,
-        use_ensemble_entropy=use_ensemble_entropy,
-        source_proto_stats=source_proto_stats,
-        alpha_source_kl=alpha_source_kl,
         adapt_all_prototypes=adapt_all_prototypes,
         logit_weight=logit_weight,
     )
     return proto_model
-
-
-def setup_proto_entropy_eata(model, entropy_threshold=0.4):
-    """Set up Prototype Entropy adaptation with EATA-style thresholding."""
-    model = proto_entropy.configure_model(model)
-    params, param_names = proto_entropy.collect_params(model)
-    optimizer = setup_optimizer(params)
-    proto_model = proto_entropy.ProtoEntropyEATA(
-        model,
-        optimizer,
-        steps=cfg.OPTIM.STEPS,
-        episodic=cfg.MODEL.EPISODIC,
-        entropy_threshold=entropy_threshold
-    )
-    return proto_model
-
-
-def setup_loss_adapt(model):
-    """Set up Loss-based adaptation."""
-    model = loss_adapt.configure_model(model)
-    params, param_names = loss_adapt.collect_params(model)
-    optimizer = setup_optimizer(params)
-    loss_model = loss_adapt.LossAdapt(
-        model,
-        optimizer,
-        steps=cfg.OPTIM.STEPS,
-        episodic=cfg.MODEL.EPISODIC
-    )
-    # logger.info(f"model for adaptation: %s", model)
-    # logger.info(f"params for adaptation: %s", param_names)
-    # logger.info(f"optimizer for adaptation: %s", optimizer)
-    return loss_model
-
-
-def setup_fisher_proto(model):
-    """Set up Fisher-guided prototype adaptation."""
-    model = fisher_proto.configure_model(model)
-    params, param_names = fisher_proto.collect_params(model)
-    optimizer = setup_optimizer(params)
-    fisher_model = fisher_proto.FisherProto(
-        model,
-        optimizer,
-        steps=cfg.OPTIM.STEPS,
-        episodic=cfg.MODEL.EPISODIC,
-    )
-    # Ensure wrapper (and its buffers such as fisher_scores) are on the
-    # same device as the underlying model parameters.
-    device = next(model.parameters()).device
-    fisher_model = fisher_model.to(device)
-    # logger.info(f"model for adaptation (Fisher): %s", model)
-    # logger.info(f"params for adaptation (Fisher): %s", param_names)
-    # logger.info(f"optimizer for adaptation (Fisher): %s", optimizer)
-    return fisher_model
 
 
 def setup_eata(model, fishers):
@@ -331,151 +251,6 @@ def setup_eata(model, fishers):
         episodic=cfg.MODEL.EPISODIC
     )
     return eata_model
-
-
-def setup_sar(model):
-    """Set up SAR adaptation."""
-    model = sar_adapt.configure_model(model)
-    params, param_names = sar_adapt.collect_params(model)
-    # SAR uses SAM optimizer with SGD base
-    base_optimizer = torch.optim.SGD
-    optimizer = sar_adapt.SAM(params, base_optimizer, lr=cfg.OPTIM.LR, momentum=0.9)
-    return sar_adapt.SAR(model, optimizer, steps=cfg.OPTIM.STEPS, episodic=cfg.MODEL.EPISODIC)
-
-
-def setup_memo(model, lr=0.00025, batch_size=64, steps=1):
-    """Set up MEMO adaptation.
-    
-    MEMO (Test Time Robustness via Adaptation and Augmentation) adapts
-    the model to each test sample by minimizing the entropy of the marginal
-    distribution over multiple augmented views.
-    """
-    model = memo_adapt.configure_model(model)
-    params, param_names = memo_adapt.collect_params(model)
-    
-    # MEMO uses SGD optimizer with momentum
-    optimizer = torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=0.0)
-    
-    memo_model = memo_adapt.MEMO(
-        model,
-        optimizer,
-        steps=steps,
-        batch_size=batch_size,
-        episodic=True
-    )
-    return memo_model
-
-
-def extract_underlying_model(adapted_model):
-    """Extract the underlying PPNet model from adaptation wrappers.
-    
-    Args:
-        adapted_model: Can be a wrapped model (Tent, EATA, ProtoEntropy, etc.) or raw model
-    
-    Returns:
-        The underlying PPNet model
-    """
-    # If it's a wrapped model, access the .model attribute
-    if hasattr(adapted_model, 'model'):
-        return adapted_model.model
-    # Otherwise, assume it's already the raw model
-    return adapted_model
-
-
-def run_interpretability_analysis(model_or_wrapper, method_name, image_paths, 
-                                  model_path, test_image_dir, output_dir, 
-                                  corruption_str, log=None):
-    """Run local analysis for interpretability comparison.
-    
-    Args:
-        model_or_wrapper: The model (may be wrapped in adaptation method)
-                         IMPORTANT: The model should be in its adapted state (after running on test set)
-        method_name: Name of the method (e.g., 'Normal', 'EATA', 'ProtoEntropy-Imp+Conf')
-        image_paths: List of image paths relative to test_image_dir
-        model_path: Path to the saved model (to find prototype images)
-        test_image_dir: Base directory for test images (should be clean test_dir)
-        output_dir: Base output directory for analysis results
-        corruption_str: String describing corruption (for subdirectory)
-        log: Logger function (optional)
-    """
-    if log is None:
-        log = print
-    
-    # Extract underlying model - this preserves the adapted parameters
-    # The wrapper's .model attribute points to the same object, so adaptations are preserved
-    ppnet = extract_underlying_model(model_or_wrapper)
-    
-    # For adaptation methods that use train mode (like Tent, ProtoEntropy), 
-    # we need to keep them in train mode to preserve adapted parameters
-    # But local_analysis will set eval mode, which is fine for most cases
-    # However, for LayerNorm/BatchNorm adaptation, we might want to preserve train mode
-    # For now, let's use eval mode for analysis (this is what local_analysis does anyway)
-    ppnet.eval()  # Ensure eval mode for analysis
-    
-    # Determine prototype image directory from model path
-    # Typically: saved_models/arch/exp/model.pth -> saved_models/arch/exp/img_name/
-    model_dir = os.path.dirname(model_path)
-    # Try common prototype image directory names
-    possible_img_dirs = [
-        os.path.join(model_dir, 'img'),
-        os.path.join(model_dir, 'prototype_imgs'),
-        os.path.join(model_dir, 'prototype-img'),
-    ]
-    load_img_dir = None
-    for img_dir in possible_img_dirs:
-        if os.path.exists(img_dir):
-            load_img_dir = img_dir
-            break
-    
-    if load_img_dir is None:
-        log(f"WARNING: Could not find prototype image directory for {method_name}. Skipping interpretability analysis.")
-        log(f"  Searched in: {possible_img_dirs}")
-        return
-    
-    # Extract epoch number from model filename
-    model_filename = os.path.basename(model_path)
-    epoch_match = re.search(r'\d+', model_filename)
-    start_epoch_number = int(epoch_match.group(0)) if epoch_match else 0
-    
-    # Create save directory for this method
-    save_analysis_path = os.path.join(output_dir, 'interpretability', corruption_str, method_name)
-    os.makedirs(save_analysis_path, exist_ok=True)
-    
-    # Create logger for this analysis
-    log_file = os.path.join(save_analysis_path, f'{method_name}_analysis.log')
-    analysis_log, logclose = create_logger(log_filename=log_file)
-    
-    log(f"\n>>> Running interpretability analysis for {method_name}")
-    log(f"  Analysis output: {save_analysis_path}")
-    log(f"  Prototype images: {load_img_dir}")
-    
-    # Run local analysis for each image
-    for img_path in image_paths:
-        try:
-            analysis_log(f'\n{"="*60}')
-            analysis_log(f'Analyzing image: {img_path}')
-            analysis_log(f'Method: {method_name}')
-            analysis_log(f'{"="*60}')
-            
-            local_analysis.local_analysis(
-                imgs=img_path,
-                ppnet=ppnet,
-                save_analysis_path=save_analysis_path,
-                test_image_dir=test_image_dir,
-                start_epoch_number=start_epoch_number,
-                load_img_dir=load_img_dir,
-                log=analysis_log,
-                prototype_layer_stride=1
-            )
-            log(f"  ✓ Analyzed: {img_path}")
-        except Exception as e:
-            log(f"  ✗ Error analyzing {img_path}: {e}")
-            analysis_log(f"ERROR analyzing {img_path}: {e}")
-            import traceback
-            analysis_log(traceback.format_exc())
-    
-    logclose()
-    log(f"  Analysis complete for {method_name}")
 
 
 def create_performance_plots(results_dict, output_dir, corruption_info=""):
@@ -566,17 +341,17 @@ def parse_modes(mode_arg: str):
     Parse a comma-separated list of modes.
 
     If empty or contains 'all', all modes are enabled.
-    Valid individual modes: normal, tent, proto, proto_importance, proto_confidence, proto_importance_confidence, proto_eata, loss, fisher, eata, sar, memo.
+    Valid individual modes: normal, proto_importance_confidence, eata.
     """
     if not mode_arg:
-        return {"normal", "tent", "proto", "proto_importance", "proto_confidence", "proto_importance_confidence", "proto_eata", "loss", "fisher", "eata", "sar", "memo"}
+        return {"normal", "proto_importance_confidence", "eata"}
 
     raw = [m.strip().lower() for m in mode_arg.split(",") if m.strip()]
     modes = set(raw)
     if "all" in modes:
-        return {"normal", "tent", "proto", "proto_importance", "proto_confidence", "proto_importance_confidence", "proto_eata", "loss", "fisher", "eata", "sar", "memo"}
+        return {"normal", "proto_importance_confidence", "eata"}
 
-    valid = {"normal", "tent", "proto", "proto_importance", "proto_confidence", "proto_importance_confidence", "proto_eata", "loss", "fisher", "eata", "sar", "memo"}
+    valid = {"normal", "proto_importance_confidence", "eata"}
     selected = modes & valid
     return selected or valid
 
@@ -710,13 +485,10 @@ def evaluate_model(model, loader, description="Inference", track_per_batch=False
 
 
 def run_unified_inference(model_path, gpu_id='0', corruption=None, severity=1, mode='all', 
-                         use_pre_generated=True, use_clean_fisher=False, proto_threshold=None,
-                         reset_mode=None, reset_frequency=10, confidence_threshold=0.7, ema_alpha=0.999,
+                         use_pre_generated=True,
                          use_geometric_filter=False, geo_filter_threshold=0.3, output_dir='./plots',
                          consensus_strategy='max', consensus_ratio=0.5,
                          adaptation_mode='layernorm_only',
-                         use_ensemble_entropy=False,
-                         use_source_stats=False, alpha_source_kl=0.0, num_source_samples=500,
                          interpretability_images=None, interpretability_num_images=0,
                          interpretability_mode='random',
                          use_prototype_metrics=False, proto_baseline_samples=None,
@@ -802,49 +574,6 @@ def run_unified_inference(model_path, gpu_id='0', corruption=None, severity=1, m
     # Store detailed prototype info for later visualization (avoids re-inference issues)
     detailed_proto_storage = {}
     
-    # --- Compute Source Prototype Statistics (if requested) ---
-    source_proto_stats = None
-    if use_source_stats and alpha_source_kl > 0:
-        print(f'\n>>> Computing source prototype statistics on clean data...')
-        print(f'Loading clean images from: {test_dir}')
-        
-        # Load a temporary model for computing source stats
-        temp_model = torch.load(model_path, weights_only=False)
-        temp_model = temp_model.to(device)
-        temp_model.eval()
-        
-        # Create clean data loader
-        transform_clean = transforms.Compose([
-            transforms.Resize(size=(img_size, img_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std)
-        ])
-        clean_dataset = datasets.ImageFolder(test_dir, transform_clean)
-        
-        # Use subset for efficiency
-        if len(clean_dataset) > num_source_samples:
-            source_indices = torch.randperm(len(clean_dataset))[:num_source_samples]
-            source_subset = torch.utils.data.Subset(clean_dataset, source_indices)
-        else:
-            source_subset = clean_dataset
-        
-        source_loader = torch.utils.data.DataLoader(
-            source_subset, batch_size=32, shuffle=True, 
-            num_workers=4, pin_memory=True
-        )
-        
-        # Compute statistics
-        source_proto_stats = proto_entropy.compute_source_proto_stats(
-            temp_model, source_loader, device, num_samples=num_source_samples
-        )
-        
-        print(f"Source prototype statistics computed successfully.")
-        print("-" * 50)
-        
-        # Clean up
-        del temp_model
-        torch.cuda.empty_cache()
-
     # --- INITIALIZE PROTOTYPE METRICS EVALUATOR (if enabled) ---
     proto_metrics_evaluator = None
     if use_prototype_metrics or use_enhanced_metrics:
@@ -912,17 +641,8 @@ def run_unified_inference(model_path, gpu_id='0', corruption=None, severity=1, m
     # Determine which modes to run (supports comma-separated list).
     selected_modes = parse_modes(mode)
     run_normal = "normal" in selected_modes
-    run_tent = "tent" in selected_modes
-    run_proto = "proto" in selected_modes
-    run_proto_importance = "proto_importance" in selected_modes
-    run_proto_confidence = "proto_confidence" in selected_modes
     run_proto_importance_confidence = "proto_importance_confidence" in selected_modes
-    run_proto_eata = "proto_eata" in selected_modes
-    run_loss = "loss" in selected_modes
-    run_fisher = "fisher" in selected_modes
     run_eata = "eata" in selected_modes
-    run_sar = "sar" in selected_modes
-    run_memo = "memo" in selected_modes
 
     # --- NORMAL INFERENCE ---
     if run_normal:
@@ -989,333 +709,6 @@ def run_unified_inference(model_path, gpu_id='0', corruption=None, severity=1, m
              del base_model
              torch.cuda.empty_cache()
 
-    # --- TENT INFERENCE ---
-    if run_tent:
-        print(f'\n>>> Loading model for TENT inference from {model_path}')
-        if not os.path.exists(model_path):
-             raise FileNotFoundError(f"Model not found at {model_path}")
-             
-        # Load clean model fresh from disk (IMPORTANT: start from same state)
-        base_model = torch.load(model_path, weights_only=False)
-        base_model = base_model.to(device)
-        
-        # Setup Tent (this switches mode to train for norm layers)
-        print("Setting up Tent adaptation...")
-        tent_model = setup_tent(base_model)
-        
-        # Initialize efficiency tracker
-        tracker = EfficiencyTracker('Tent', device=str(device)) if track_efficiency else None
-        if tracker:
-            # Get adapted parameters from tent_model
-            adapted_params = [p for p in tent_model.model.parameters() if p.requires_grad]
-            tracker.count_adapted_parameters(tent_model.model, adapted_params)
-            efficiency_trackers['Tent'] = tracker
-        
-        if interpretability_enabled:
-            result = evaluate_with_optional_metrics(
-                tent_model, test_loader, proto_metrics_evaluator,
-                description="Tent Adaptation Inference",
-                track_per_batch=True,
-                store_predictions=True,
-                store_proto_details=True,
-                efficiency_tracker=tracker
-            )
-            metrics_or_acc, batch_accs, preds_dict, proto_details = result
-            predictions_storage['Tent'] = preds_dict
-            detailed_proto_storage['Tent'] = proto_details
-        else:
-            result = evaluate_with_optional_metrics(
-                tent_model, test_loader, proto_metrics_evaluator,
-                description="Tent Adaptation Inference",
-                track_per_batch=True,
-                efficiency_tracker=tracker,
-                adaptation_stats_storage=adaptation_stats_storage,
-                method_name='Tent'
-            )
-            metrics_or_acc, batch_accs = result
-
-        # Record adaptation steps AFTER evaluation (approx: 1 optimizer step per batch, repeated cfg.OPTIM.STEPS times)
-        if tracker:
-            tracker.record_adaptation_step(len(test_loader) * cfg.OPTIM.STEPS)
-        
-        # Handle both single accuracy and metrics dict
-        if isinstance(metrics_or_acc, dict):
-            results['Tent'] = metrics_or_acc
-            acc = metrics_or_acc['accuracy']
-        else:
-            results['Tent'] = metrics_or_acc
-            acc = metrics_or_acc
-            
-        results_with_batches['Tent'] = {
-            'accuracy': acc,
-            'batch_accuracies': batch_accs
-        }
-        
-        if interpretability_enabled:
-             models_for_interpretability['Tent'] = tent_model
-        
-        # Clean up
-        # del tent_model
-        # torch.cuda.empty_cache()
-
-    # --- PROTO ENTROPY INFERENCE ---
-    if run_proto:
-        print(f'\n>>> Loading model for PROTO ENTROPY inference from {model_path}')
-        if not os.path.exists(model_path):
-             raise FileNotFoundError(f"Model not found at {model_path}")
-             
-        # Load clean model fresh from disk
-        base_model = torch.load(model_path, weights_only=False)
-        base_model = base_model.to(device)
-
-        # Setup ProtoEntropy (without threshold)
-        filter_info = f", geo_filter={use_geometric_filter}" if use_geometric_filter else ""
-        consensus_info = f", consensus={consensus_strategy}" if consensus_strategy != 'max' else ""
-        adapt_info = f", adapt={adaptation_mode}" if adaptation_mode != 'layernorm_only' else ""
-        ensemble_info = ", ensemble_entropy=True" if use_ensemble_entropy else ""
-        source_info = f", source_kl={alpha_source_kl}" if alpha_source_kl > 0 else ""
-        print(f"Setting up ProtoEntropy (reset_mode={reset_mode}, freq={reset_frequency} batches{filter_info}{consensus_info}{adapt_info}{ensemble_info}{source_info})...")
-        proto_model = setup_proto_entropy(base_model, use_importance=False, use_confidence=False,
-                                         reset_mode=reset_mode, reset_frequency=reset_frequency,
-                                         confidence_threshold=confidence_threshold, ema_alpha=ema_alpha,
-                                         use_geometric_filter=use_geometric_filter,
-                                         geo_filter_threshold=geo_filter_threshold,
-                                         consensus_strategy=consensus_strategy, consensus_ratio=consensus_ratio,
-                                         adaptation_mode=adaptation_mode,
-                                         use_ensemble_entropy=use_ensemble_entropy,
-                                         source_proto_stats=source_proto_stats, alpha_source_kl=alpha_source_kl,
-                                         logit_weight=1.0 - proto_lambda)
-
-        if hasattr(proto_model, 'reset_geo_filter_stats'):
-            proto_model.reset_geo_filter_stats()
-        
-        # Initialize efficiency tracker
-        tracker = EfficiencyTracker('ProtoEntropy', device=str(device)) if track_efficiency else None
-        if tracker:
-            base_model, adapted_params = get_adapted_params_from_wrapper(proto_model)
-            tracker.count_adapted_parameters(base_model, adapted_params)
-            efficiency_trackers['ProtoEntropy'] = tracker
-        
-        if interpretability_enabled:
-            result = evaluate_with_optional_metrics(
-                proto_model, test_loader, proto_metrics_evaluator,
-                description="ProtoEntropy Adaptation Inference",
-                track_per_batch=True,
-                store_predictions=True,
-                store_proto_details=True,
-                efficiency_tracker=tracker
-            )
-            metrics_or_acc, batch_accs, preds_dict, proto_details = result
-            predictions_storage['ProtoEntropy'] = preds_dict
-            detailed_proto_storage['ProtoEntropy'] = proto_details
-        else:
-            result = evaluate_with_optional_metrics(
-                proto_model, test_loader, proto_metrics_evaluator,
-                description="ProtoEntropy Adaptation Inference",
-                track_per_batch=True,
-                efficiency_tracker=tracker
-            )
-            metrics_or_acc, batch_accs = result
-
-        if tracker:
-            tracker.record_adaptation_step(len(test_loader) * cfg.OPTIM.STEPS)
-        
-        # Handle both single accuracy and metrics dict
-        if isinstance(metrics_or_acc, dict):
-            results['ProtoEntropy'] = metrics_or_acc
-            acc = metrics_or_acc['accuracy']
-        else:
-            results['ProtoEntropy'] = metrics_or_acc
-            acc = metrics_or_acc
-            
-        results_with_batches['ProtoEntropy'] = {
-            'accuracy': acc,
-            'batch_accuracies': batch_accs
-        }
-        
-        if use_geometric_filter and hasattr(proto_model, 'get_geo_filter_stats'):
-            geo_stats = proto_model.get_geo_filter_stats()
-            results_with_batches['ProtoEntropy']['geo_stats'] = geo_stats
-
-        if interpretability_enabled:
-             models_for_interpretability['ProtoEntropy'] = proto_model
-
-        # Clean up
-        # del proto_model
-        # torch.cuda.empty_cache()
-
-    # --- PROTO ENTROPY with IMPORTANCE WEIGHTING ---
-    if run_proto_importance:
-        print(f'\n>>> Loading model for PROTO ENTROPY (Importance-Weighted) inference from {model_path}')
-        if not os.path.exists(model_path):
-             raise FileNotFoundError(f"Model not found at {model_path}")
-             
-        # Load clean model fresh from disk
-        base_model = torch.load(model_path, weights_only=False)
-        base_model = base_model.to(device)
-
-        # Setup ProtoEntropy with importance weighting
-        filter_info = f", geo_filter={use_geometric_filter}" if use_geometric_filter else ""
-        consensus_info = f", consensus={consensus_strategy}" if consensus_strategy != 'max' else ""
-        adapt_info = f", adapt={adaptation_mode}" if adaptation_mode != 'layernorm_only' else ""
-        ensemble_info = ", ensemble_entropy=True" if use_ensemble_entropy else ""
-        source_info = f", source_kl={alpha_source_kl}" if alpha_source_kl > 0 else ""
-        print(f"Setting up ProtoEntropy+Importance (reset_mode={reset_mode}, freq={reset_frequency}{filter_info}{consensus_info}{adapt_info}{ensemble_info}{source_info})...")
-        proto_model = setup_proto_entropy(base_model, use_importance=True, use_confidence=False,
-                                         reset_mode=reset_mode, reset_frequency=reset_frequency,
-                                         confidence_threshold=confidence_threshold, ema_alpha=ema_alpha,
-                                         use_geometric_filter=use_geometric_filter,
-                                         geo_filter_threshold=geo_filter_threshold,
-                                         consensus_strategy=consensus_strategy, consensus_ratio=consensus_ratio,
-                                         adaptation_mode=adaptation_mode,
-                                         use_ensemble_entropy=use_ensemble_entropy,
-                                         source_proto_stats=source_proto_stats, alpha_source_kl=alpha_source_kl,
-                                         logit_weight=1.0 - proto_lambda)
-
-        if hasattr(proto_model, 'reset_geo_filter_stats'):
-            proto_model.reset_geo_filter_stats()
-        
-        # Initialize efficiency tracker
-        tracker = EfficiencyTracker('ProtoEntropy-Importance', device=str(device)) if track_efficiency else None
-        if tracker:
-            base_model, adapted_params = get_adapted_params_from_wrapper(proto_model)
-            tracker.count_adapted_parameters(base_model, adapted_params)
-            efficiency_trackers['ProtoEntropy-Importance'] = tracker
-        
-        if interpretability_enabled:
-            result = evaluate_with_optional_metrics(
-                proto_model, test_loader, proto_metrics_evaluator,
-                description="ProtoEntropy (Importance-Weighted) Inference",
-                track_per_batch=True,
-                store_predictions=True,
-                store_proto_details=True,
-                efficiency_tracker=tracker
-            )
-            metrics_or_acc, batch_accs, preds_dict, proto_details = result
-            predictions_storage['ProtoEntropy-Importance'] = preds_dict
-            detailed_proto_storage['ProtoEntropy-Importance'] = proto_details
-        else:
-            result = evaluate_with_optional_metrics(
-                proto_model, test_loader, proto_metrics_evaluator,
-                description="ProtoEntropy (Importance-Weighted) Inference",
-                track_per_batch=True,
-                efficiency_tracker=tracker
-            )
-            metrics_or_acc, batch_accs = result
-
-        if tracker:
-            tracker.record_adaptation_step(len(test_loader) * cfg.OPTIM.STEPS)
-        
-        # Handle both single accuracy and metrics dict
-        if isinstance(metrics_or_acc, dict):
-            results['ProtoEntropy-Importance'] = metrics_or_acc
-            acc = metrics_or_acc['accuracy']
-        else:
-            results['ProtoEntropy-Importance'] = metrics_or_acc
-            acc = metrics_or_acc
-            
-        results_with_batches['ProtoEntropy-Importance'] = {
-            'accuracy': acc,
-            'batch_accuracies': batch_accs
-        }
-        
-        if use_geometric_filter and hasattr(proto_model, 'get_geo_filter_stats'):
-            geo_stats = proto_model.get_geo_filter_stats()
-            results_with_batches['ProtoEntropy-Importance']['geo_stats'] = geo_stats
-
-        if interpretability_enabled:
-             models_for_interpretability['ProtoEntropy-Importance'] = proto_model
-
-        # Clean up
-        # del proto_model
-        # torch.cuda.empty_cache()
-
-    # --- PROTO ENTROPY with CONFIDENCE WEIGHTING ---
-    if run_proto_confidence:
-        print(f'\n>>> Loading model for PROTO ENTROPY (Confidence-Weighted) inference from {model_path}')
-        if not os.path.exists(model_path):
-             raise FileNotFoundError(f"Model not found at {model_path}")
-             
-        # Load clean model fresh from disk
-        base_model = torch.load(model_path, weights_only=False)
-        base_model = base_model.to(device)
-
-        # Setup ProtoEntropy with confidence weighting
-        filter_info = f", geo_filter={use_geometric_filter}" if use_geometric_filter else ""
-        consensus_info = f", consensus={consensus_strategy}" if consensus_strategy != 'max' else ""
-        adapt_info = f", adapt={adaptation_mode}" if adaptation_mode != 'layernorm_only' else ""
-        ensemble_info = ", ensemble_entropy=True" if use_ensemble_entropy else ""
-        source_info = f", source_kl={alpha_source_kl}" if alpha_source_kl > 0 else ""
-        print(f"Setting up ProtoEntropy+Confidence (reset_mode={reset_mode}, freq={reset_frequency}{filter_info}{consensus_info}{adapt_info}{ensemble_info}{source_info})...")
-        proto_model = setup_proto_entropy(base_model, use_importance=False, use_confidence=True,
-                                         reset_mode=reset_mode, reset_frequency=reset_frequency,
-                                         confidence_threshold=confidence_threshold, ema_alpha=ema_alpha,
-                                         use_geometric_filter=use_geometric_filter,
-                                         geo_filter_threshold=geo_filter_threshold,
-                                         consensus_strategy=consensus_strategy, consensus_ratio=consensus_ratio,
-                                         adaptation_mode=adaptation_mode,
-                                         use_ensemble_entropy=use_ensemble_entropy,
-                                         source_proto_stats=source_proto_stats, alpha_source_kl=alpha_source_kl,
-                                         logit_weight=1.0 - proto_lambda)
-
-        if hasattr(proto_model, 'reset_geo_filter_stats'):
-            proto_model.reset_geo_filter_stats()
-        
-        # Initialize efficiency tracker
-        tracker = EfficiencyTracker('ProtoEntropy-Confidence', device=str(device)) if track_efficiency else None
-        if tracker:
-            base_model, adapted_params = get_adapted_params_from_wrapper(proto_model)
-            tracker.count_adapted_parameters(base_model, adapted_params)
-            efficiency_trackers['ProtoEntropy-Confidence'] = tracker
-        
-        if interpretability_enabled:
-            result = evaluate_with_optional_metrics(
-                proto_model, test_loader, proto_metrics_evaluator,
-                description="ProtoEntropy (Confidence-Weighted) Inference",
-                track_per_batch=True,
-                store_predictions=True,
-                store_proto_details=True,
-                efficiency_tracker=tracker
-            )
-            metrics_or_acc, batch_accs, preds_dict, proto_details = result
-            predictions_storage['ProtoEntropy-Confidence'] = preds_dict
-            detailed_proto_storage['ProtoEntropy-Confidence'] = proto_details
-        else:
-            result = evaluate_with_optional_metrics(
-                proto_model, test_loader, proto_metrics_evaluator,
-                description="ProtoEntropy (Confidence-Weighted) Inference",
-                track_per_batch=True,
-                efficiency_tracker=tracker
-            )
-            metrics_or_acc, batch_accs = result
-
-        if tracker:
-            tracker.record_adaptation_step(len(test_loader) * cfg.OPTIM.STEPS)
-        
-        # Handle both single accuracy and metrics dict
-        if isinstance(metrics_or_acc, dict):
-            results['ProtoEntropy-Confidence'] = metrics_or_acc
-            acc = metrics_or_acc['accuracy']
-        else:
-            results['ProtoEntropy-Confidence'] = metrics_or_acc
-            acc = metrics_or_acc
-            
-        results_with_batches['ProtoEntropy-Confidence'] = {
-            'accuracy': acc,
-            'batch_accuracies': batch_accs
-        }
-        
-        if use_geometric_filter and hasattr(proto_model, 'get_geo_filter_stats'):
-            geo_stats = proto_model.get_geo_filter_stats()
-            results_with_batches['ProtoEntropy-Confidence']['geo_stats'] = geo_stats
-
-        if interpretability_enabled:
-             models_for_interpretability['ProtoEntropy-Confidence'] = proto_model
-
-        # Clean up
-        # del proto_model
-        # torch.cuda.empty_cache()
-
     # --- PROTO ENTROPY with IMPORTANCE+CONFIDENCE WEIGHTING ---
     if run_proto_importance_confidence:
         print(f'\n>>> Loading model for PROTO ENTROPY (Importance+Confidence-Weighted) inference from {model_path}')
@@ -1330,18 +723,12 @@ def run_unified_inference(model_path, gpu_id='0', corruption=None, severity=1, m
         filter_info = f", geo_filter={use_geometric_filter}" if use_geometric_filter else ""
         consensus_info = f", consensus={consensus_strategy}" if consensus_strategy != 'max' else ""
         adapt_info = f", adapt={adaptation_mode}" if adaptation_mode != 'layernorm_only' else ""
-        ensemble_info = ", ensemble_entropy=True" if use_ensemble_entropy else ""
-        source_info = f", source_kl={alpha_source_kl}" if alpha_source_kl > 0 else ""
-        print(f"Setting up ProtoEntropy Imp+Conf (reset_mode={reset_mode}, freq={reset_frequency}{filter_info}{consensus_info}{adapt_info}{ensemble_info}{source_info})...")
+        print(f"Setting up ProtoEntropy Imp+Conf ({filter_info.lstrip(', ')}{consensus_info}{adapt_info})...")
         proto_model = setup_proto_entropy(base_model, use_importance=True, use_confidence=True,
-                                         reset_mode=reset_mode, reset_frequency=reset_frequency,
-                                         confidence_threshold=confidence_threshold, ema_alpha=ema_alpha,
                                          use_geometric_filter=use_geometric_filter,
                                          geo_filter_threshold=geo_filter_threshold,
                                          consensus_strategy=consensus_strategy, consensus_ratio=consensus_ratio,
                                          adaptation_mode=adaptation_mode,
-                                         use_ensemble_entropy=use_ensemble_entropy,
-                                         source_proto_stats=source_proto_stats, alpha_source_kl=alpha_source_kl,
                                          logit_weight=1.0 - proto_lambda)
 
         # Reset stats before evaluation
@@ -1416,129 +803,6 @@ def run_unified_inference(model_path, gpu_id='0', corruption=None, severity=1, m
         # del proto_model
         # torch.cuda.empty_cache()
 
-    # --- PROTO ENTROPY+EATA INFERENCE ---
-    if run_proto_eata:
-        print(f'\n>>> Loading model for PROTO ENTROPY+EATA inference from {model_path}')
-        if not os.path.exists(model_path):
-             raise FileNotFoundError(f"Model not found at {model_path}")
-             
-        # Load clean model fresh from disk
-        base_model = torch.load(model_path, weights_only=False)
-        base_model = base_model.to(device)
-
-        # Setup ProtoEntropy with EATA threshold
-        print(f"Setting up ProtoEntropy+EATA adaptation (threshold={proto_threshold})...")
-        proto_eata_model = setup_proto_entropy_eata(base_model, entropy_threshold=proto_threshold)
-
-        if interpretability_enabled:
-            acc, batch_accs, preds_dict, proto_details = evaluate_model(
-                proto_eata_model, test_loader, 
-                description="ProtoEntropy+EATA Adaptation Inference",
-                track_per_batch=True,
-                store_predictions=True,
-                store_proto_details=True
-            )
-            predictions_storage['ProtoEntropy+EATA'] = preds_dict
-            detailed_proto_storage['ProtoEntropy+EATA'] = proto_details
-        else:
-            acc, batch_accs = evaluate_model(proto_eata_model, test_loader, 
-                                            description="ProtoEntropy+EATA Adaptation Inference",
-                                            track_per_batch=True)
-            
-        results['ProtoEntropy+EATA'] = acc
-        results_with_batches['ProtoEntropy+EATA'] = {
-            'accuracy': acc,
-            'batch_accuracies': batch_accs
-        }
-
-        if interpretability_enabled:
-             models_for_interpretability['ProtoEntropy+EATA'] = proto_eata_model
-
-        # Clean up
-        # del proto_eata_model
-        # torch.cuda.empty_cache()
-
-    # --- LOSS ADAPT INFERENCE ---
-    if run_loss:
-        print(f'\n>>> Loading model for LOSS ADAPT inference from {model_path}')
-        if not os.path.exists(model_path):
-             raise FileNotFoundError(f"Model not found at {model_path}")
-             
-        base_model = torch.load(model_path, weights_only=False)
-        base_model = base_model.to(device)
-        
-        print("Setting up Loss Adapt adaptation...")
-        loss_model = setup_loss_adapt(base_model)
-        
-        if interpretability_enabled:
-            acc, batch_accs, preds_dict, proto_details = evaluate_model(
-                loss_model, test_loader, 
-                description="Loss Adapt Inference",
-                track_per_batch=True,
-                store_predictions=True,
-                store_proto_details=True
-            )
-            predictions_storage['LossAdapt'] = preds_dict
-            detailed_proto_storage['LossAdapt'] = proto_details
-        else:
-            acc, batch_accs = evaluate_model(loss_model, test_loader, 
-                                            description="Loss Adapt Inference",
-                                            track_per_batch=True)
-            
-        results['LossAdapt'] = acc
-        results_with_batches['LossAdapt'] = {
-            'accuracy': acc,
-            'batch_accuracies': batch_accs
-        }
-        
-        if interpretability_enabled:
-             models_for_interpretability['LossAdapt'] = loss_model
-        
-        # del loss_model
-        # torch.cuda.empty_cache()
-
-    # --- FISHER-PROTO INFERENCE ---
-    if run_fisher:
-        print(f'\n>>> Loading model for FISHER PROTO inference from {model_path}')
-        if not os.path.exists(model_path):
-             raise FileNotFoundError(f"Model not found at {model_path}")
-
-        # Load clean model fresh from disk
-        base_model = torch.load(model_path, weights_only=False)
-        base_model = base_model.to(device)
-
-        # Setup Fisher-guided prototype adaptation
-        print("Setting up Fisher-guided Proto adaptation...")
-        fisher_model = setup_fisher_proto(base_model)
-
-        if interpretability_enabled:
-            acc, batch_accs, preds_dict, proto_details = evaluate_model(
-                fisher_model, test_loader, 
-                description="FisherProto Adaptation Inference",
-                track_per_batch=True,
-                store_predictions=True,
-                store_proto_details=True
-            )
-            predictions_storage['FisherProto'] = preds_dict
-            detailed_proto_storage['FisherProto'] = proto_details
-        else:
-            acc, batch_accs = evaluate_model(fisher_model, test_loader, 
-                                            description="FisherProto Adaptation Inference",
-                                            track_per_batch=True)
-            
-        results['FisherProto'] = acc
-        results_with_batches['FisherProto'] = {
-            'accuracy': acc,
-            'batch_accuracies': batch_accs
-        }
-
-        if interpretability_enabled:
-             models_for_interpretability['FisherProto'] = fisher_model
-
-        # Clean up
-        # del fisher_model
-        # torch.cuda.empty_cache()
-
     # --- EATA INFERENCE ---
     if run_eata:
         print(f'\n>>> Loading model for EATA inference from {model_path}')
@@ -1549,31 +813,10 @@ def run_unified_inference(model_path, gpu_id='0', corruption=None, severity=1, m
         base_model = torch.load(model_path, weights_only=False)
         base_model = base_model.to(device)
 
-        if use_clean_fisher:
-            print("Computing Fisher Information Matrix on CLEAN data (using clean images)...")
-            # Prepare clean data loader for Fisher computation (subset of 2000 samples)
-            transform_clean = get_corrupted_transform(img_size, mean, std, None, 1)
-            clean_dataset = datasets.ImageFolder(test_dir, transform_clean)
-            
-            num_fisher_samples = 2000
-            if len(clean_dataset) > num_fisher_samples:
-                fisher_indices = torch.randperm(len(clean_dataset))[:num_fisher_samples]
-                fisher_subset = torch.utils.data.Subset(clean_dataset, fisher_indices)
-            else:
-                fisher_subset = clean_dataset
-                
-            fisher_loader = torch.utils.data.DataLoader(
-                fisher_subset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True
-            )
-            
-            base_model = eata_adapt.configure_model(base_model)
-            fishers = eata_adapt.compute_fishers(base_model, fisher_loader, device)
-        else:
-            print("Computing Fisher Information Matrix on TEST data (online estimation)...")
-            # Use test loader (corrupted data) to estimate Fishers
-            base_model = eata_adapt.configure_model(base_model)
-            # Compute Fishers on a subset of test data (e.g., first 2000 samples)
-            fishers = eata_adapt.compute_fishers(base_model, test_loader, device, num_samples=500)
+        print("Computing Fisher Information Matrix on TEST data (online estimation)...")
+        # Use test loader (corrupted data) to estimate Fishers
+        base_model = eata_adapt.configure_model(base_model)
+        fishers = eata_adapt.compute_fishers(base_model, test_loader, device, num_samples=500)
         
         print("Fisher information computed.")
 
@@ -1635,120 +878,6 @@ def run_unified_inference(model_path, gpu_id='0', corruption=None, severity=1, m
         
         # Clean up
         # del eata_model
-        # torch.cuda.empty_cache()
-
-    # --- SAR INFERENCE ---
-    if run_sar:
-        print(f'\n>>> Loading model for SAR inference from {model_path}')
-        if not os.path.exists(model_path):
-             raise FileNotFoundError(f"Model not found at {model_path}")
-
-        # Load clean model fresh from disk
-        base_model = torch.load(model_path, weights_only=False)
-        base_model = base_model.to(device)
-
-        # Setup SAR
-        print("Setting up SAR adaptation...")
-        sar_model = setup_sar(base_model)
-        
-        # Initialize efficiency tracker
-        tracker = EfficiencyTracker('SAR', device=str(device)) if track_efficiency else None
-        if tracker:
-            base_model_inner, adapted_params = get_adapted_params_from_wrapper(sar_model)
-            tracker.count_adapted_parameters(base_model_inner, adapted_params)
-            efficiency_trackers['SAR'] = tracker
-
-        if interpretability_enabled:
-            result = evaluate_with_optional_metrics(
-                sar_model, test_loader, proto_metrics_evaluator,
-                description="SAR Adaptation Inference",
-                track_per_batch=True,
-                store_predictions=True,
-                store_proto_details=True,
-                efficiency_tracker=tracker
-            )
-            metrics_or_acc, batch_accs, preds_dict, proto_details = result
-            predictions_storage['SAR'] = preds_dict
-            detailed_proto_storage['SAR'] = proto_details
-        else:
-            result = evaluate_with_optional_metrics(
-                sar_model, test_loader, proto_metrics_evaluator,
-                description="SAR Adaptation Inference",
-                track_per_batch=True,
-                efficiency_tracker=tracker,
-                adaptation_stats_storage=adaptation_stats_storage,
-                method_name='SAR'
-            )
-            metrics_or_acc, batch_accs = result
-
-        if tracker:
-            tracker.record_adaptation_step(len(test_loader) * cfg.OPTIM.STEPS)
-        
-        # Handle both single accuracy and metrics dict
-        if isinstance(metrics_or_acc, dict):
-            results['SAR'] = metrics_or_acc
-            acc = metrics_or_acc['accuracy']
-        else:
-            results['SAR'] = metrics_or_acc
-            acc = metrics_or_acc
-            
-        results_with_batches['SAR'] = {
-            'accuracy': acc,
-            'batch_accuracies': batch_accs
-        }
-
-        if interpretability_enabled:
-             models_for_interpretability['SAR'] = sar_model
-
-        # Clean up
-        # del sar_model
-        # torch.cuda.empty_cache()
-
-    # --- MEMO INFERENCE ---
-    if run_memo:
-        print(f'\n>>> Loading model for MEMO inference from {model_path}')
-        if not os.path.exists(model_path):
-             raise FileNotFoundError(f"Model not found at {model_path}")
-
-        # Load clean model fresh from disk
-        base_model = torch.load(model_path, weights_only=False)
-        base_model = base_model.to(device)
-
-        print("Setting up MEMO adaptation...")
-        print("MEMO parameters: lr=0.00025, batch_size=32, steps=1")
-        memo_model = setup_memo(base_model, lr=0.00025, batch_size=32, steps=1)
-        
-        # MEMO requires batch_size=1 (processes one image at a time)
-        memo_loader = torch.utils.data.DataLoader(
-            test_dataset, batch_size=1, shuffle=False,
-            num_workers=4, pin_memory=False)
-
-        if interpretability_enabled:
-            acc, batch_accs, preds_dict, proto_details = evaluate_model(
-                memo_model, memo_loader, 
-                description="MEMO Adaptation Inference",
-                track_per_batch=True,
-                store_predictions=True,
-                store_proto_details=True
-            )
-            predictions_storage['MEMO'] = preds_dict
-            detailed_proto_storage['MEMO'] = proto_details
-        else:
-            acc, batch_accs = evaluate_model(memo_model, memo_loader, 
-                                            description="MEMO Adaptation Inference",
-                                            track_per_batch=True)
-            
-        results['MEMO'] = acc
-        results_with_batches['MEMO'] = {
-            'accuracy': acc,
-            'batch_accuracies': batch_accs
-        }
-
-        if interpretability_enabled:
-             models_for_interpretability['MEMO'] = memo_model
-
-        # Clean up
-        # del memo_model
         # torch.cuda.empty_cache()
 
     # --- RUN COMPREHENSIVE INTERPRETABILITY ANALYSIS ---
@@ -1833,11 +962,6 @@ def run_unified_inference(model_path, gpu_id='0', corruption=None, severity=1, m
                 'geo_filter_threshold': geo_filter_threshold if use_geometric_filter else 'N/A',
                 'consensus_strategy': consensus_strategy,
                 'adaptation_mode': adaptation_mode,
-                'reset_mode': reset_mode,
-                'reset_frequency': reset_frequency,
-                'use_ensemble_entropy': use_ensemble_entropy,
-                'use_source_stats': use_source_stats,
-                'alpha_source_kl': alpha_source_kl if use_source_stats else 0.0,
                 'interpretability_mode': interpretability_mode,
             }
             
@@ -1950,17 +1074,8 @@ def run_unified_inference(model_path, gpu_id='0', corruption=None, severity=1, m
     # Print results with metrics if available
     method_display_names = {
         'Normal': 'Normal',
-        'Tent': 'Tent',
-        'ProtoEntropy': 'ProtoEntropy',
-        'ProtoEntropy-Importance': 'ProtoEntropy-Importance',
-        'ProtoEntropy-Confidence': 'ProtoEntropy-Confidence',
         'ProtoEntropy-Imp+Conf': 'ProtoEntropy-Imp+Conf',
-        'ProtoEntropy+EATA': 'ProtoEntropy+EATA',
-        'LossAdapt': 'LossAdapt',
-        'FisherProto': 'FisherProto',
         'EATA': 'EATA',
-        'SAR': 'SAR',
-        'MEMO': 'MEMO'
     }
     
     for method_key, display_name in method_display_names.items():
@@ -2015,7 +1130,7 @@ if __name__ == '__main__':
         default='all',
         help=(
             'Inference mode(s): '
-            'use a comma-separated list of any of [normal, tent, proto, proto_importance, proto_confidence, proto_importance_confidence, proto_eata, loss, fisher, eata, sar, memo], '
+            'use a comma-separated list of any of [normal, proto_importance_confidence, eata], '
             'or "all" (default) to run every mode.'
         ),
     )  
@@ -2024,52 +1139,6 @@ if __name__ == '__main__':
         action='store_true',
         default=False,
         help='Force on-the-fly corruption generation (ignore pre-generated images). By default, uses pre-generated images if available.'
-    )
-    
-    parser.add_argument(
-        '--use-clean-fisher',
-        action='store_true',
-        default=False,
-        help='Use clean data to compute Fisher Information Matrix for EATA (requires access to clean data). Default is False (use test data).'
-    )
-    
-    parser.add_argument(
-        '--proto-threshold',
-        type=float,
-        default=0.4,
-        help='Entropy threshold for ProtoEntropy+EATA adaptation (default: 0.4). Samples with higher entropy are ignored.'
-    )
-    
-    parser.add_argument(
-        '--reset-mode',
-        type=str,
-        default=None,
-        choices=['episodic', 'periodic', 'confidence', 'hybrid', 'ema', 'none', None],
-        help='Reset strategy for ProtoEntropy: episodic (every sample), periodic (every N samples), '
-             'confidence (when conf drops), hybrid (periodic+confidence), ema (smooth updates), '
-             'none (no resets). Default: inferred from --episodic flag.'
-    )
-    
-    parser.add_argument(
-        '--reset-frequency',
-        type=int,
-        default=10,
-        help='How often to reset in periodic/hybrid modes in BATCHES (default: 10 batches). '
-             'With batch_size=128, this means reset every 1280 samples.'
-    )
-    
-    parser.add_argument(
-        '--confidence-threshold',
-        type=float,
-        default=0.7,
-        help='Confidence threshold for confidence/hybrid reset modes (default: 0.7)'
-    )
-    
-    parser.add_argument(
-        '--ema-alpha',
-        type=float,
-        default=0.999,
-        help='EMA decay factor for ema mode (default: 0.999, closer to 1 = slower adaptation)'
     )
     
     parser.add_argument(
@@ -2098,10 +1167,10 @@ if __name__ == '__main__':
         '--consensus-strategy',
         type=str,
         default='max',
-        choices=['max', 'mean', 'median', 'top_k_mean', 'weighted_mean'],
+        choices=['max', 'mean', 'top_k_mean'],
         help='Strategy for aggregating sub-prototypes: '
-             'max (best sub-proto, default), mean (all must agree), median (robust), '
-             'top_k_mean (soft consensus), weighted_mean (similarity-weighted)'
+             'max (best sub-proto, default), mean (all must agree), '
+             'top_k_mean (soft consensus)'
     )
     
     parser.add_argument(
@@ -2115,50 +1184,10 @@ if __name__ == '__main__':
         '--adaptation-mode',
         type=str,
         default='layernorm_only',
-        choices=['layernorm_only', 'layernorm_proto', 'layernorm_proto_patch', 
-                 'layernorm_proto_last', 'layernorm_attn_bias', 'layernorm_last_block', 
-                 'full_proto', 'all_adaptive'],
+        choices=['layernorm_only', 'layernorm_attn_bias'],
         help='What parameters to adapt during TTA:\n'
-             'layernorm_only (default) - Only LayerNorms (safest)\n'
-             'layernorm_proto - LayerNorms + Prototype vectors\n'
-             'layernorm_proto_patch - LayerNorms + Prototypes + Patch selection\n'
-             'layernorm_proto_last - LayerNorms + Prototypes + Last layer\n'
-             'layernorm_attn_bias - LayerNorms + Attention biases\n'
-             'layernorm_last_block - LayerNorms + Last transformer blocks\n'
-             'full_proto - Prototypes + Patch select + Last layer (no backbone)\n'
-             'all_adaptive - Everything except backbone features'
-    )
-    
-    parser.add_argument(
-        '--use-ensemble-entropy',
-        action='store_true',
-        default=False,
-        help='Use ensemble entropy: compute entropy for each sub-prototype independently, then average. '
-             'Prevents single overconfident sub-prototype from dominating (requires sub-prototypes).'
-    )
-    
-    parser.add_argument(
-        '--use-source-stats',
-        action='store_true',
-        default=False,
-        help='Compute prototype activation statistics on clean source data (like EATA Fisher). '
-             'Requires access to clean data. Used for KL divergence regularization.'
-    )
-    
-    parser.add_argument(
-        '--alpha-source-kl',
-        type=float,
-        default=0.0,
-        help='Weight for KL divergence regularization to source prototype distribution (default: 0.0 = disabled). '
-             'Prevents test-time prototype activations from drifting too far from source distribution. '
-             'Typical values: 0.01 to 1.0. Only active if --use-source-stats is set.'
-    )
-    
-    parser.add_argument(
-        '--num-source-samples',
-        type=int,
-        default=500,
-        help='Number of clean source samples to use for computing prototype statistics (default: 500)'
+             'layernorm_only (default) - Only LayerNorms\n'
+             'layernorm_attn_bias - LayerNorms + Attention biases'
     )
     
     parser.add_argument(
@@ -2261,12 +1290,9 @@ if __name__ == '__main__':
     use_pre_generated = not args.on_the_fly
     
     run_unified_inference(args.model, args.gpuid, corruption, args.severity, args.mode,
-                         use_pre_generated, args.use_clean_fisher, args.proto_threshold,
-                         args.reset_mode, args.reset_frequency, args.confidence_threshold, args.ema_alpha,
+                         use_pre_generated,
                          args.use_geometric_filter, args.geo_filter_threshold, args.output_dir,
                          args.consensus_strategy, args.consensus_ratio, args.adaptation_mode,
-                         args.use_ensemble_entropy, args.use_source_stats, args.alpha_source_kl,
-                         args.num_source_samples,
                          args.interpretability_images, args.interpretability_num_images,
                          args.interpretability_mode,
                          args.prototype_metrics, args.proto_baseline_samples,

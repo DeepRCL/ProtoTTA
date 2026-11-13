@@ -177,7 +177,7 @@ def main():
             "consistency_corrupted": {m: float(np.mean([cons_mean[m][p] for p in protos])) for m in METHODS},
             "paired": {}, "per_corruption": per_corr,
         }
-        for a, b in (("prototta", "eata"), ("prototta", "unadapted"), ("eata", "unadapted")):
+        for a, b in (("prototta", "eata"),):
             res["paired"][f"{a}-{b}"] = {
                 "stability": boot_ci(np.array(stab[a]) - np.array(stab[b]), clusters),
                 # classes are resampled with all their prototypes (they share the class's images)

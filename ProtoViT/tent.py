@@ -18,7 +18,7 @@ class Tent(nn.Module):
         assert steps > 0, "tent requires >= 1 step(s) to forward and update"
         self.episodic = episodic
 
-        # note: if the model is never reset, like for continual adaptation,
+        # note: if the model is never reset,
         # then skipping the state copy would save memory
         self.model_state, self.optimizer_state = \
             copy_model_and_optimizer(self.model, self.optimizer)

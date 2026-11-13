@@ -101,19 +101,15 @@ def setup_tent(model, lr=None):
 
 
 def setup_proto_entropy(model, use_importance=False, use_confidence=False,
-                        reset_mode=None, reset_frequency=10,
-                        confidence_threshold=0.7, ema_alpha=0.999,
                         use_geometric_filter=False, geo_filter_threshold=0.3,
                         consensus_strategy='max', consensus_ratio=0.5,
                         adaptation_mode='layernorm_only',
-                        use_ensemble_entropy=False,
-                        source_proto_stats=None, alpha_source_kl=0.0,
                         adapt_all_prototypes=False,
                         logit_weight=0.0,
                         shared_confidence_weighting=False,
                         gradient_normalize=False,
                         adaptive_lambda=False,
-                        adaptive_lambda_strategy='relative_reliability',
+                        adaptive_lambda_strategy=None,
                         adaptive_delta0=0.25,
                         adaptive_topk=3,
                         router_min_consistency=0.25,
@@ -123,31 +119,17 @@ def setup_proto_entropy(model, use_importance=False, use_confidence=False,
                         record_diagnostics=False,
                         samplewise_lambda=False,
                         optimizer_lr=None,
-                        semantic_prototype_weights=None,
-                        compatibility_student=None,
-                        compatibility_floor=0.25,
-                        semantic_logit_blend=0.0,
-                        semantic_fusion='fixed',
-                        semantic_contrast_weight=0.0,
-                        semantic_temperature=0.25,
                         entropy_filter_factor=None):
     """Set up Prototype Entropy adaptation (without threshold).
     
     Args:
         use_importance: Use prototype importance weighting
         use_confidence: Use confidence weighting
-        reset_mode: 'episodic', 'periodic', 'confidence', 'hybrid', 'ema', 'none'
-        reset_frequency: How often to reset in 'periodic'/'hybrid' modes (in BATCHES)
-        confidence_threshold: Confidence threshold for 'confidence'/'hybrid' modes
-        ema_alpha: EMA decay for 'ema' mode
         use_geometric_filter: Use geometric similarity to filter unreliable samples
         geo_filter_threshold: Minimum similarity to ANY prototype to be considered reliable
         consensus_strategy: How to aggregate sub-prototypes
         consensus_ratio: For 'top_k_mean', fraction of sub-prototypes to use
         adaptation_mode: What parameters to adapt
-        use_ensemble_entropy: Treat sub-prototypes as ensemble
-        source_proto_stats: Pre-computed source prototype statistics
-        alpha_source_kl: Weight for source KL regularization
         adapt_all_prototypes: If True, adapt all prototypes (not just target)
     """
     model = proto_entropy.configure_model(model, adaptation_mode=adaptation_mode)
@@ -164,20 +146,12 @@ def setup_proto_entropy(model, use_importance=False, use_confidence=False,
         model,
         optimizer,
         steps=cfg.OPTIM.STEPS,
-        episodic=cfg.MODEL.EPISODIC,
         use_prototype_importance=use_importance,
         use_confidence_weighting=use_confidence,
-        reset_mode=reset_mode,
-        reset_frequency=reset_frequency,
-        confidence_threshold=confidence_threshold,
-        ema_alpha=ema_alpha,
         use_geometric_filter=use_geometric_filter,
         geo_filter_threshold=geo_filter_threshold,
         consensus_strategy=consensus_strategy,
         consensus_ratio=consensus_ratio,
-        use_ensemble_entropy=use_ensemble_entropy,
-        source_proto_stats=source_proto_stats,
-        alpha_source_kl=alpha_source_kl,
         adapt_all_prototypes=adapt_all_prototypes,
         logit_weight=logit_weight,
         shared_confidence_weighting=shared_confidence_weighting,
@@ -192,13 +166,6 @@ def setup_proto_entropy(model, use_importance=False, use_confidence=False,
         lambda_max=lambda_max,
         record_diagnostics=record_diagnostics,
         samplewise_lambda=samplewise_lambda,
-        semantic_prototype_weights=semantic_prototype_weights,
-        compatibility_student=compatibility_student,
-        compatibility_floor=compatibility_floor,
-        semantic_logit_blend=semantic_logit_blend,
-        semantic_fusion=semantic_fusion,
-        semantic_contrast_weight=semantic_contrast_weight,
-        semantic_temperature=semantic_temperature,
         entropy_filter_margin=entropy_filter_margin,
     )
     return proto_model
@@ -517,24 +484,17 @@ def build_eval_model(model_path, mode_name, mode_config, device, fishers, fisher
             base_model,
             use_importance=mode_config.get('use_importance', True),
             use_confidence=mode_config.get('use_confidence', True),
-            reset_mode=mode_config.get('reset_mode', None),
-            reset_frequency=mode_config.get('reset_frequency', 10),
-            confidence_threshold=mode_config.get('confidence_threshold', 0.7),
-            ema_alpha=mode_config.get('ema_alpha', 0.999),
             use_geometric_filter=mode_config.get('use_geometric_filter', False),
             geo_filter_threshold=mode_config.get('geo_filter_threshold', 0.3),
             consensus_strategy=mode_config.get('consensus_strategy', 'max'),
             consensus_ratio=mode_config.get('consensus_ratio', 0.5),
             adaptation_mode=mode_config.get('adaptation_mode', 'layernorm_only'),
-            use_ensemble_entropy=mode_config.get('use_ensemble_entropy', False),
-            source_proto_stats=mode_config.get('source_proto_stats', None),
-            alpha_source_kl=mode_config.get('alpha_source_kl', 0.0),
             adapt_all_prototypes=mode_config.get('adapt_all_prototypes', False),
             logit_weight=mode_config.get('logit_weight', 0.0),
             shared_confidence_weighting=mode_config.get('shared_confidence_weighting', False),
             gradient_normalize=mode_config.get('gradient_normalize', False),
             adaptive_lambda=mode_config.get('adaptive_lambda', False),
-            adaptive_lambda_strategy=mode_config.get('adaptive_lambda_strategy', 'relative_reliability'),
+            adaptive_lambda_strategy=mode_config.get('adaptive_lambda_strategy', None),
             adaptive_delta0=mode_config.get('adaptive_delta0', 0.25),
             adaptive_topk=mode_config.get('adaptive_topk', 3),
             router_min_consistency=mode_config.get('router_min_consistency', 0.25),
@@ -871,9 +831,9 @@ def main():
     parser.add_argument('--proto-gradient-normalize', action='store_true',
                         help='Normalize component losses by their gradient norms')
     parser.add_argument('--proto-lambda-ema-momentum', type=float, default=0.9)
-    # The default is recorded in the configuration of the fixed-lambda mode, where it is unused;
-    # proto_imp_conf_adaptive_samplewise requires one of the listed strategies.
-    parser.add_argument('--proto-adaptive-strategy', default='relative_reliability',
+    # Used by proto_imp_conf_adaptive_samplewise (single estimates); the router modes set
+    # their own strategy.
+    parser.add_argument('--proto-adaptive-strategy', default=None,
                        choices=['activation_margin',
                                 'relative_evidence',
                                 'mean_act_rel',
@@ -893,7 +853,7 @@ def main():
     parser.add_argument('--proto-disable-geometric-filter', action='store_true',
                         help='Disable the canonical geometric reliability filter')
     parser.add_argument('--proto-consensus-strategy', default='top_k_mean',
-                        choices=['max', 'mean', 'median', 'top_k_mean', 'weighted_mean'])
+                        choices=['max', 'mean', 'top_k_mean'])
     parser.add_argument('--proto-adaptation-mode', default='layernorm_attn_bias',
                         choices=['layernorm_only', 'layernorm_attn_bias',
                                  'all_adaptive', 'all_parameters'])
@@ -944,7 +904,7 @@ def main():
                      '(clean/corrupted pairing assumes the published order)')
     if args.proto_reliability_filter is not None and args.proto_disable_geometric_filter:
         parser.error('Use either --proto-reliability-filter or --proto-disable-geometric-filter')
-    if (args.proto_adaptive_strategy == 'relative_reliability'
+    if (args.proto_adaptive_strategy is None
             and (args.modes is None or 'proto_imp_conf_adaptive_samplewise' in args.modes)):
         parser.error('proto_imp_conf_adaptive_samplewise requires --proto-adaptive-strategy '
                      '(activation_margin, relative_evidence or mean_act_rel)')
@@ -1004,11 +964,6 @@ def main():
                                  else args.proto_geo_filter_threshold),
         'consensus_strategy': args.proto_consensus_strategy,
         'adaptation_mode': args.proto_adaptation_mode,
-        'use_ensemble_entropy': False,
-        'reset_mode': None,
-        'reset_frequency': 10,
-        'confidence_threshold': 0.7,
-        'ema_alpha': 0.999,
         'consensus_ratio': 0.5,
         'shared_confidence_weighting': args.proto_shared_confidence_weighting,
         'gradient_normalize': args.proto_gradient_normalize,

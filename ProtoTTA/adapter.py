@@ -236,7 +236,7 @@ class ProtoTTAAdapter(nn.Module):
 
     Every call computes the update on the current batch, takes one optimizer
     step when the reliable set is non-empty, and returns the output of the
-    pre-update forward pass. Adaptation is continual across calls; ``reset()``
+    pre-update forward pass. Updates accumulate across calls; ``reset()``
     restores the source model and optimizer, e.g. between target domains.
     """
 

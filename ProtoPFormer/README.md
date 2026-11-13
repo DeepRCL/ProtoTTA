@@ -64,10 +64,9 @@ All ProtoTTA runs use:
 - one detached confidence weight shared by both loss terms
   (`--proto_shared_confidence_weighting`);
 - gradient normalization of both components (`--proto_gradient_normalize`);
-- the controller with δ0 = 0.25, Top-3, consistency floor 0.25, λ in [0, 1] and
-  no temporal smoothing (`--proto_adaptive_delta0 0.25 --proto_adaptive_topk 3
-  --proto_router_min_consistency 0.25 --proto_lambda_min 0 --proto_lambda_max 1
-  --proto_lambda_ema_momentum 0`);
+- the controller with δ0 = 0.25, Top-3, consistency floor 0.25 and λ in [0, 1]
+  (`--proto_adaptive_delta0 0.25 --proto_adaptive_topk 3
+  --proto_router_min_consistency 0.25 --proto_lambda_min 0 --proto_lambda_max 1`);
 - LayerNorm affine parameters and attention biases adapted in training mode
   (`--adapt_model_mode train`), Adam with learning rate 10⁻³, one update per
   batch, batch size 128, and the source checkpoint restored for every

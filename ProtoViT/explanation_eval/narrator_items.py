@@ -17,24 +17,13 @@ Sampling (seeded, label use = stratification only; the narrator never sees label
 Each pair yields three presentations (STATE 1 -> STATE 2):
   main      (unadapted, prototta)
   swapped   (prototta, unadapted)
-  identical (X, X), X a seeded coin per pair  -> the true answer is "no change".
+  identical (X, X), X a seeded coin per pair.
 
-Ground truth per state (what the board shows, plus offline label-based criteria):
-  boxes          (prototype rank, 14x14 cell) for every active sub-patch of the top-5
-                 predicted-class prototypes (slot > 0.5; exactly the boxes drawn);
-  box region     BACKGROUND if < 50% of the cell is bird in the CUB segmentation mask
-                 (pixel = bird if >= 3 of 5 annotators, value >= 128, after the same
-                 bbox crop + resize to 224 as the model input); otherwise the coarse
-                 group of the nearest visible CUB keypoint (Euclidean, cell centre):
-                 HEAD {beak, crown, forehead, eyes, nape, throat}, BODY {back, breast,
-                 belly}, WING, TAIL, LEGS;
-  dominant       region(s) with the most boxes (ties -> all tied regions), share;
-  cells          set of boxed cells (focus-shift Jaccard);
-  pictures       set of sha256 of the training-example pictures shown (290 groups of
-                 prototypes share a picture, so identity is judged on pictures);
-  n_competing    entries of the top-10 any-class list whose class != the state's prediction;
-  offline only   correct, PCA-W (paper Eq. 8, k = 10, true class), part-hit (near),
-                 background share.
+Ground truth per state (used by narrator_analysis.py; the training-example pictures are compared
+there from the stored board states):
+  cells          set of boxed cells: every active sub-patch of the top-5 predicted-class
+                 prototypes (slot > 0.5; exactly the boxes drawn);
+  n_competing    entries of the top-10 any-class list whose class != the state's prediction.
 """
 import argparse
 import hashlib
@@ -50,16 +39,10 @@ HERE = Path(__file__).resolve().parent
 PV = HERE.parent
 sys.path.insert(0, str(HERE))
 import cub_parts as lm  # noqa: E402
-from paths import CHECKPOINT, CUB_SEGMENTATIONS  # noqa: E402
 
-SEG = CUB_SEGMENTATIONS
 METHODS = ("unadapted", "prototta")
 STRATA = ("broken", "fixed", "both_wrong", "both_right")   # rarest first (source-photo uniqueness)
-REGIONS = ("HEAD", "BODY", "WING", "TAIL", "LEGS", "BACKGROUND")
-GROUP_OF = {2: "HEAD", 5: "HEAD", 6: "HEAD", 7: "HEAD", 10: "HEAD", 11: "HEAD", 15: "HEAD",
-            1: "BODY", 3: "BODY", 4: "BODY", 9: "WING", 13: "WING", 14: "TAIL", 8: "LEGS", 12: "LEGS"}
-MASK_BIRD = 128        # >= 3 of 5 annotators
-CELL_BIRD = 0.5        # fraction of a 16x16 cell that must be bird
+REGIONS = ("HEAD", "BODY", "WING", "TAIL", "LEGS", "BACKGROUND")   # answer options of the narrator prompt
 PER_CELL = 4
 N_SMOKE = 4
 SEED = 20261108
@@ -106,59 +89,18 @@ def load_states(root):
         {m: ver[m]["export_sha256"] for m in METHODS}
 
 
-def bird_cells(rel, bbox_of, img_id_of):
-    """14x14 fraction of bird pixels per cell, in the model's 224 input frame."""
-    with Image.open(lm.CUB / "images" / rel) as im:
-        W0, H0 = im.size
-    x, y, w, h = bbox_of[img_id_of[rel]]
-    left, top = max(0, int(x)), max(0, int(y))
-    right, bottom = min(W0, int(x) + int(w)), min(H0, int(y) + int(h))
-    with Image.open(lm.CROPPED / rel) as im:   # same crop as the test images (asserted in lm too)
-        assert im.size == (right - left, bottom - top), rel
-    with Image.open(SEG / (rel[:-4] + ".png")) as m:
-        m = m.convert("L")
-        assert m.size == (W0, H0), (rel, m.size, (W0, H0))
-        m = m.crop((left, top, right, bottom)).resize((lm.IMG, lm.IMG), Image.BILINEAR)
-    bird = np.asarray(m, dtype=np.float32) >= MASK_BIRD
-    return bird.reshape(lm.GRID, lm.PATCH, lm.GRID, lm.PATCH).mean(axis=(1, 3))
-
-
-def box_region(flat, cov, pts):
-    r, c = divmod(int(flat), lm.GRID)
-    if cov[r, c] < CELL_BIRD:
-        return "BACKGROUND"
-    cx, cy = c * lm.PATCH + lm.PATCH / 2, r * lm.PATCH + lm.PATCH / 2
-    pid = min(pts, key=lambda t: ((t[1] - cx) ** 2 + (t[2] - cy) ** 2, t[0]))[0]
-    return GROUP_OF[pid]
-
-
-def state_gt(rec, cov, pts, W, pic_hash):
+def state_gt(rec):
     boxes = [(k, int(f)) for k, p in enumerate(rec["top"]) for f, s in zip(p["loc"], p["slots"])
              if float(s) > lm.SLOT_ACTIVE]
     if not boxes:
         return None
-    regions = [box_region(f, cov, pts) for _, f in boxes]
-    counts = {g: regions.count(g) for g in REGIONS}
-    mx = max(counts.values())
-    hit = lm.sample_metrics(rec, pts)
     return {
-        "pred": int(rec["pred"]), "correct": bool(rec["pred"] == rec["label"]),
-        "n_boxes": len(boxes), "box_regions": regions, "region_counts": counts,
-        "dominant": [g for g in REGIONS if counts[g] == mx], "dominant_share": mx / len(boxes),
         "cells": sorted({f for _, f in boxes}),
-        "proto_ids": [int(p["p"]) for p in rec["top"]],
-        "pictures": sorted({pic_hash[int(p["p"])] for p in rec["top"]}),
         "n_competing": int(sum(int(t["cls"]) != int(rec["pred"]) for t in rec["top_any"])),
-        "background_share": counts["BACKGROUND"] / len(boxes),
-        "part_hit_near": None if hit is None else hit[0],
-        "pcaw": lm.pcaw(rec, W),
     }
 
 
 def main():
-    import torch
-    sys.path.insert(0, str(PV))
-    import model  # noqa: F401  (for torch.load)
     from narrator_board import state_board
     from render_cards import PROTO_DIR
 
@@ -172,13 +114,7 @@ def main():
         raise SystemExit(f"{out} or {smoke_out} exists; refusing to redraw the validation set")
 
     data, roots, class_names, export_sha = load_states(Path(args.states_root))
-    W = torch.load(CHECKPOINT, weights_only=False, map_location="cpu").last_layer.weight.detach().cpu().numpy()
     kp = lm.load_keypoints()
-    images = dict(l.split() for l in (lm.CUB / "images.txt").read_text().splitlines())
-    img_id_of = {rel: i for i, rel in images.items()}
-    bbox_of = {k: tuple(map(float, v)) for k, *v in
-               (l.split() for l in (lm.CUB / "bounding_boxes.txt").read_text().splitlines())}
-    pic_hash = {p: sha256_bytes((PROTO_DIR / f"prototype-img-original{p}.png").read_bytes()) for p in range(W.shape[1])}
     bb = np.load(PROTO_DIR / "bb4.npy")
 
     # population of eligible-by-label pairs (rendering/GT checked lazily on draw)
@@ -201,9 +137,7 @@ def main():
         if rel in used:
             n_rejected["photo_used"] += 1
             return None
-        pts = kp[rel]
-        cov = bird_cells(rel, bbox_of, img_id_of)
-        gt = {"unadapted": state_gt(u, cov, pts, W, pic_hash), "prototta": state_gt(p, cov, pts, W, pic_hash)}
+        gt = {"unadapted": state_gt(u), "prototta": state_gt(p)}
         if any(v is None for v in gt.values()):
             n_rejected["no_box"] += 1
             return None
@@ -211,7 +145,7 @@ def main():
                   for m, r in (("unadapted", u), ("prototta", p))}
         root = PV / roots[c]
         with Image.open(root / rel) as im_c, Image.open(lm.CROPPED / rel) as im_k:
-            assert im_c.size == im_k.size, (c, rel, im_c.size, im_k.size)   # same frame as masks/keypoints
+            assert im_c.size == im_k.size, (c, rel, im_c.size, im_k.size)   # same frame as the keypoints
         try:
             for m in METHODS:
                 state_board(root, rel, states[m], class_names, bb, "STATE 1")
@@ -221,8 +155,7 @@ def main():
             return None
         used.add(rel)
         return {"corruption": c, "sample_index": i, "path": rel, "dataset_root": roots[c],
-                "label": int(u["label"]), "states": states, "gt": gt,
-                "bird_cell_fraction": np.round(cov, 4).tolist()}
+                "label": int(u["label"]), "states": states, "gt": gt}
 
     pos = {k: 0 for k in order}
 
@@ -285,9 +218,8 @@ def main():
         prng.shuffle(plan)
         return plan
 
-    common = {"seed": SEED, "severity": SEVERITY, "methods": list(METHODS), "regions": list(REGIONS),
+    common = {"seed": SEED, "severity": SEVERITY, "methods": list(METHODS),
               "class_names": class_names, "export_sha256": export_sha,
-              "segmentation_archive_sha256": "dc77f6cffea0cbe2e41d4201115c8f29a6320ecb04fffd2444f51b8066e4b84f",
               "definition": __doc__,
               "code_sha256": {f: sha256_bytes((HERE / f).read_bytes())
                               for f in ("narrator_items.py", "narrator_board.py", "render_cards.py",

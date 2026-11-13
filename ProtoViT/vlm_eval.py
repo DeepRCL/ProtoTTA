@@ -13,7 +13,7 @@ import textwrap
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import matplotlib
 
@@ -55,31 +55,24 @@ CORRUPTION_TYPES = [
     "speckle_noise",
 ]
 
-METHOD_ORDER = ["unadapted", "tent", "eata", "sar", "memo", "prototta"]
-TABLE_METHOD_ORDER = ["unadapted", "memo", "sar", "tent", "eata", "prototta"]
+METHOD_ORDER = ["unadapted", "tent", "eata", "prototta"]
+TABLE_METHOD_ORDER = ["unadapted", "tent", "eata", "prototta"]
 BATCH_PRECOMPUTE_METHODS = {"unadapted", "prototta"}
 DISPLAY_NAMES = {
     "unadapted": "Unadapted",
     "tent": "Tent",
     "eata": "EATA",
-    "sar": "SAR",
-    "memo": "Memo",
     "prototta": "ProtoTTA",
 }
 
 PROTO_TTA_DEFAULTS = {
     "use_importance": True,
     "use_confidence": True,
-    "reset_mode": None,
-    "reset_frequency": 10,
-    "confidence_threshold": 0.7,
-    "ema_alpha": 0.999,
     "use_geometric_filter": True,
     "geo_filter_threshold": 0.92,
     "consensus_strategy": "top_k_mean",
     "consensus_ratio": 0.5,
     "adaptation_mode": "layernorm_attn_bias",
-    "use_ensemble_entropy": False,
 }
 
 PROTOTYPE_PATTERNS = [
@@ -223,34 +216,10 @@ def parse_args() -> argparse.Namespace:
         help="GPU id to expose via CUDA_VISIBLE_DEVICES.",
     )
     parser.add_argument(
-        "--memo-lr",
-        type=float,
-        default=2.5e-4,
-        help="Learning rate for MEMO.",
-    )
-    parser.add_argument(
-        "--memo-batch-size",
-        type=int,
-        default=64,
-        help="Number of augmented views per MEMO step.",
-    )
-    parser.add_argument(
-        "--memo-steps",
-        type=int,
-        default=1,
-        help="Number of MEMO adaptation steps per sample.",
-    )
-    parser.add_argument(
         "--tta-steps",
         type=int,
         default=1,
-        help="Number of test-time adaptation steps for Tent/EATA/SAR/ProtoTTA.",
-    )
-    parser.add_argument(
-        "--eata-fisher-source",
-        choices=["subset", "clean"],
-        default="subset",
-        help="Use the selected corrupted subset or clean data to estimate EATA Fishers.",
+        help="Number of test-time adaptation steps for Tent/EATA/ProtoTTA.",
     )
     parser.add_argument(
         "--fisher-samples",
@@ -286,14 +255,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=10,
         help="Save full-dataset precompute cache every N batches instead of every batch.",
-    )
-    parser.add_argument(
-        "--msp-only",
-        action="store_true",
-        help=(
-            "Replay inference for samples with existing reasoning artifacts, export maximum "
-            "softmax probability into 03_meta.json, and exit without loading the VLM."
-        ),
     )
     return parser.parse_args()
 
@@ -551,23 +512,6 @@ def build_subset_manifest(
     return manifest
 
 
-def build_subset_clean_loader(
-    clean_dir: Path, batch_size: int, fisher_samples: int
-) -> torch.utils.data.DataLoader:
-    dataset = load_clean_dataset(clean_dir)
-    if len(dataset) > fisher_samples:
-        generator = torch.Generator().manual_seed(42)
-        indices = torch.randperm(len(dataset), generator=generator)[:fisher_samples]
-        dataset = torch.utils.data.Subset(dataset, indices.tolist())
-    return torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True,
-    )
-
-
 class ManifestSubsetDataset(torch.utils.data.Dataset):
     """A deterministic dataset wrapper over the saved subset manifest."""
 
@@ -611,17 +555,14 @@ def compute_eata_fishers(
     args: argparse.Namespace,
     subset_samples: Sequence[Dict],
 ) -> Dict:
-    LOGGER.info("Computing EATA Fishers from %s data", args.eata_fisher_source)
+    LOGGER.info("Computing EATA Fishers from subset data")
     fisher_model = torch.load(str(model_path), weights_only=False)
     fisher_model = fisher_model.to(device)
     fisher_model = eata_adapt.configure_model(fisher_model)
 
-    if args.eata_fisher_source == "clean":
-        loader = build_subset_clean_loader(args.clean_dir, args.batch_size, args.fisher_samples)
-    else:
-        loader = build_subset_corrupted_loader(
-            subset_samples, args.corrupted_dir, args.severity, args.batch_size
-        )
+    loader = build_subset_corrupted_loader(
+        subset_samples, args.corrupted_dir, args.severity, args.batch_size
+    )
 
     fishers = eata_adapt.compute_fishers(
         fisher_model, loader, device, num_samples=args.fisher_samples
@@ -653,30 +594,16 @@ def setup_method_model(
     if method == "eata":
         fishers = eata_fishers or compute_eata_fishers(model_path, device, args, subset_samples)
         return inference_utils.setup_eata(base_model, fishers)
-    if method == "sar":
-        return inference_utils.setup_sar(base_model)
-    if method == "memo":
-        return inference_utils.setup_memo(
-            base_model,
-            lr=args.memo_lr,
-            batch_size=args.memo_batch_size,
-            steps=args.memo_steps,
-        )
     if method == "prototta":
         return inference_utils.setup_proto_entropy(
             base_model,
             use_importance=PROTO_TTA_DEFAULTS["use_importance"],
             use_confidence=PROTO_TTA_DEFAULTS["use_confidence"],
-            reset_mode=PROTO_TTA_DEFAULTS["reset_mode"],
-            reset_frequency=PROTO_TTA_DEFAULTS["reset_frequency"],
-            confidence_threshold=PROTO_TTA_DEFAULTS["confidence_threshold"],
-            ema_alpha=PROTO_TTA_DEFAULTS["ema_alpha"],
             use_geometric_filter=PROTO_TTA_DEFAULTS["use_geometric_filter"],
             geo_filter_threshold=PROTO_TTA_DEFAULTS["geo_filter_threshold"],
             consensus_strategy=PROTO_TTA_DEFAULTS["consensus_strategy"],
             consensus_ratio=PROTO_TTA_DEFAULTS["consensus_ratio"],
             adaptation_mode=PROTO_TTA_DEFAULTS["adaptation_mode"],
-            use_ensemble_entropy=PROTO_TTA_DEFAULTS["use_ensemble_entropy"],
         )
     raise ValueError(f"Unsupported method: {method}")
 
@@ -1872,144 +1799,6 @@ def run_method_evaluation(
         torch.cuda.empty_cache()
 
 
-def export_msp_scores(
-    methods: Sequence[str],
-    manifest_samples: Sequence[Dict],
-    args: argparse.Namespace,
-    device: torch.device,
-) -> Dict[str, Dict]:
-    """Replay each method's stream and attach output confidence to saved samples.
-
-    Stateful TTA methods must see the same preceding examples as the reasoning-board
-    run.  Consequently this pass iterates each corruption in dataset order, but it
-    stops after the last saved target and avoids all prototype rendering and VLM work.
-    A reproduced prediction mismatch is recorded and excluded by the downstream
-    failure-detection analysis.
-    """
-    export_summary: Dict[str, Dict] = {}
-    eata_fishers = None
-    if "eata" in methods:
-        eata_targets = [
-            sample
-            for sample in manifest_samples
-            if sample_artifact_paths(args.results_dir, "eata", sample)["meta"].exists()
-        ]
-        if eata_targets:
-            eata_fishers = compute_eata_fishers(
-                args.model, device, args, manifest_samples
-            )
-
-    for method in methods:
-        targets_by_corruption: Dict[str, Dict[str, Dict]] = {}
-        for sample in manifest_samples:
-            artifacts = sample_artifact_paths(args.results_dir, method, sample)
-            if not artifacts["meta"].exists():
-                continue
-            key = precompute_key(sample["corruption_type"], sample["image_path"])
-            targets_by_corruption.setdefault(sample["corruption_type"], {})[key] = {
-                "sample": sample,
-                "meta_path": artifacts["meta"],
-            }
-
-        exported = mismatched = 0
-        total_targets = sum(len(items) for items in targets_by_corruption.values())
-        LOGGER.info("MSP export for %s: %d saved targets", DISPLAY_NAMES[method], total_targets)
-        for corruption_type in CORRUPTION_TYPES:
-            target_map = targets_by_corruption.get(corruption_type, {})
-            if not target_map:
-                continue
-
-            eval_model = setup_method_model(
-                method, args.model, device, args, manifest_samples, eata_fishers
-            )
-            eval_model.eval()
-            dataset = load_corruption_dataset(args.corrupted_dir, corruption_type, args.severity)
-            loader = torch.utils.data.DataLoader(
-                dataset,
-                batch_size=args.batch_size,
-                shuffle=False,
-                num_workers=4,
-                pin_memory=True,
-            )
-            remaining = set(target_map)
-            cursor = 0
-            pbar = tqdm(loader, desc=f"msp:{DISPLAY_NAMES[method]}:{corruption_type}", leave=False)
-            for images, _labels in pbar:
-                images = images.to(device)
-                with torch.no_grad():
-                    outputs = eval_model(images)
-                logits, _min_distances, _values = normalize_outputs(outputs)
-                probabilities = logits.float().softmax(dim=1)
-                top2 = probabilities.topk(k=min(2, probabilities.shape[1]), dim=1).values
-                predictions = probabilities.argmax(dim=1)
-
-                for batch_index in range(images.size(0)):
-                    dataset_index = cursor + batch_index
-                    sample_path, _ = dataset.samples[dataset_index]
-                    rel_path = os.path.relpath(sample_path, dataset.root)
-                    key = precompute_key(corruption_type, rel_path)
-                    if key not in remaining:
-                        continue
-
-                    meta_path = target_map[key]["meta_path"]
-                    meta = load_json(meta_path)
-                    reproduced_prediction = int(predictions[batch_index].item())
-                    saved_prediction = int(meta["predicted_index"])
-                    matches = reproduced_prediction == saved_prediction
-                    meta["max_softmax_probability"] = float(top2[batch_index, 0].item())
-                    meta["softmax_top2_margin"] = float(
-                        (top2[batch_index, 0] - top2[batch_index, 1]).item()
-                    ) if top2.shape[1] > 1 else 1.0
-                    meta["msp_prediction_index"] = reproduced_prediction
-                    meta["msp_prediction_matches_saved"] = matches
-                    meta["msp_export_batch_size"] = int(args.batch_size)
-                    meta["msp_definition"] = "max(softmax(logits))"
-                    write_json(meta_path, meta)
-                    exported += 1
-                    mismatched += int(not matches)
-                    remaining.remove(key)
-
-                cursor += images.size(0)
-                if not remaining:
-                    break
-
-            if remaining:
-                LOGGER.warning(
-                    "MSP export missed %d target(s) for %s/%s",
-                    len(remaining),
-                    DISPLAY_NAMES[method],
-                    corruption_type,
-                )
-            del eval_model
-            torch.cuda.empty_cache()
-
-        export_summary[method] = {
-            "display_name": DISPLAY_NAMES[method],
-            "num_targets": total_targets,
-            "num_exported": exported,
-            "num_prediction_mismatches": mismatched,
-            "batch_size": int(args.batch_size),
-        }
-        LOGGER.info(
-            "MSP export finished for %s: exported=%d mismatched=%d",
-            DISPLAY_NAMES[method],
-            exported,
-            mismatched,
-        )
-
-    for method, payload in export_summary.items():
-        write_json(
-            args.results_dir / "failure_detection" / f"msp_export_{method}.json",
-            {"method": method, "definition": "max(softmax(logits))", **payload},
-        )
-    if len(export_summary) > 1:
-        write_json(
-            args.results_dir / "failure_detection" / "msp_export_summary.json",
-            {"methods": export_summary, "definition": "max(softmax(logits))"},
-        )
-    return export_summary
-
-
 def aggregate_scores(results_dir: Path, manifest_samples: Sequence[Dict]) -> Dict[str, Dict]:
     aggregate: Dict[str, Dict] = {}
     for method in METHOD_ORDER:
@@ -2390,11 +2179,6 @@ def main() -> None:
         severity=args.severity,
         rebuild=args.rebuild_subset,
     )
-
-    if args.msp_only:
-        methods = [args.method] if args.method else METHOD_ORDER
-        export_msp_scores(methods, manifest["samples"], args, device)
-        return
 
     if args.part in (None, "A"):
         run_part_a(manifest, args, device, prototype_img_dir, class_names)

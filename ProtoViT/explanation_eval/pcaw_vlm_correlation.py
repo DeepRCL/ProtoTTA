@@ -170,7 +170,6 @@ def run_export_pcaw(args) -> None:
                 outputs = model(images)
             logits, _, similarities = vlm_eval.normalize_outputs(outputs)
             values = exact_pcaw(similarities, labels, ppnet)
-            probabilities = logits.float().softmax(dim=1)
             for local in range(labels.numel()):
                 dataset_index = cursor + local
                 path, _ = dataset.samples[dataset_index]
@@ -178,7 +177,6 @@ def run_export_pcaw(args) -> None:
                 key = f"{corruption}::{relative}"
                 if key not in selected:
                     continue
-                top2 = probabilities[local].topk(2).values
                 payload["entries"][key] = {
                     "public_id": selected[key]["public_id"],
                     "corruption_type": corruption,
@@ -187,8 +185,6 @@ def run_export_pcaw(args) -> None:
                     "predicted_index": int(logits[local].argmax().item()),
                     "ground_truth_index": int(labels[local].item()),
                     "is_correct": bool(logits[local].argmax() == labels[local]),
-                    "msp": float(top2[0].item()),
-                    "margin": float((top2[0] - top2[1]).item()),
                 }
             cursor += labels.numel()
             if batch_index % 10 == 0:

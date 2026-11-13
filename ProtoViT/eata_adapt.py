@@ -27,7 +27,7 @@ class EATA(nn.Module):
         self.fishers = fishers # fisher regularizer items for anti-forgetting, need to be calculated pre model adaptation (Eqn. 9)
         self.fisher_alpha = fisher_alpha # trade-off \beta for two losses (Eqn. 8) 
 
-        # note: if the model is never reset, like for continual adaptation,
+        # note: if the model is never reset,
         # then skipping the state copy would save memory
         self.model_state, self.optimizer_state = \
             copy_model_and_optimizer(self.model, self.optimizer)

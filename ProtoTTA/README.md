@@ -53,7 +53,7 @@ For every incoming batch, `ProtoTTAAdapter`:
 8. takes one optimizer step on the unified objective (Eq. 3) and returns the
    output of the forward pass.
 
-No target labels are used. Adaptation is continual across calls;
+No target labels are used. Updates accumulate across calls;
 `reset()` restores the source model and optimizer state, for example between
 target domains.
 

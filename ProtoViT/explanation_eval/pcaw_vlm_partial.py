@@ -7,7 +7,7 @@ Reads the 1,300 method-image observations written by pcaw_vlm_correlation.py ana
     regressed (least squares) on an intercept, prediction correctness and corruption-type indicators
     (and a method indicator when both methods are pooled), and the residuals are correlated (Pearson);
     computed pooled over both methods and within each method;
-  * the Spearman correlation among correctly classified observations (pooled over both methods).
+  * the Spearman correlation among correctly classified observations, pooled over both methods.
 """
 import argparse
 import json
@@ -48,12 +48,14 @@ def main():
         for dim in DIMS:
             v, p = arr(sub, dim), arr(sub, "exact_pcaw")
             partial = pearsonr(res(rankdata(p)), res(rankdata(v)))[0]
-            correct_only = spearmanr(p[c == 1], v[c == 1])[0]
-            out[scope][dim] = {"n": len(sub), "partial_spearman": float(partial),
-                               "spearman_correct_only": float(correct_only), "n_correct": int(c.sum())}
+            out[scope][dim] = {"n": len(sub), "partial_spearman": float(partial)}
             controls = "correctness, corruption" + (", method" if scope == "pooled" else "")
-            print(f"{scope:9s} {dim:22s} partial rho (controls: {controls}) {partial:.3f} | "
-                  f"rho among correct (n={int(c.sum())}) {correct_only:.3f}")
+            line = f"{scope:9s} {dim:22s} partial rho (controls: {controls}) {partial:.3f}"
+            if scope == "pooled":
+                correct_only = spearmanr(p[c == 1], v[c == 1])[0]
+                out[scope][dim].update({"spearman_correct_only": float(correct_only), "n_correct": int(c.sum())})
+                line += f" | rho among correct (n={int(c.sum())}) {correct_only:.3f}"
+            print(line)
     if a.json:
         Path(a.json).write_text(json.dumps(out, indent=1))
 

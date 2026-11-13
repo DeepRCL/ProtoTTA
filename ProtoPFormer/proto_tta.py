@@ -12,9 +12,10 @@ signature, which returns:
 ProtoPFormer uses:
   - `model.prototype_class_identity`  → [num_prototypes, num_classes]
   - `model.last_layer`                → classification head (local branch)
-  - LayerNorm layers inside the ViT backbone for TTA
+  - LayerNorm layers and attention biases inside the ViT backbone for TTA
 
-Only `proto_imp_conf_v3` (best variant) + base `tent` + `eata` are implemented.
+Implements ProtoTTA (fixed or sample-wise adaptive lambda) and the Tent and
+EATA baselines of this backbone.
 """
 
 from copy import deepcopy
@@ -57,7 +58,7 @@ def _get_logits(out):
 # ============================================================================
 
 def collect_params(model, adaptation_mode='layernorm_only'):
-    """Collect parameters to adapt (LayerNorms, Biases, or Prototypes)."""
+    """Collect parameters to adapt (LayerNorms and attention biases)."""
     params, names = [], []
 
     if 'layernorm' in adaptation_mode:
@@ -81,28 +82,14 @@ def collect_params(model, adaptation_mode='layernorm_only'):
                         params.append(p)
                         names.append(f"{nm}.{np_}")
 
-    if 'proto' in adaptation_mode:
-        for attr in ['prototype_vectors', 'prototype_vectors_global']:
-            if hasattr(model, attr):
-                p = getattr(model, attr)
-                params.append(p)
-                names.append(attr)
-
     return params, names
 
 def configure_model(model, adaptation_mode='layernorm_only', model_mode='train'):
-    """Configure adaptation parameters and the explicitly requested model mode.
-
-    ``train`` matches the upstream Tent/EATA implementations and the historical
-    paper runs. ``eval`` is a deterministic transformer ablation that disables
-    DropPath/dropout; it must not be silently reported as standard Tent.
-    """
-    if model_mode == 'train':
-        model.train()
-    elif model_mode == 'eval':
-        model.eval()
-    else:
+    """Configure adaptation parameters; adaptation runs in training mode
+    (as in the upstream Tent/EATA implementations)."""
+    if model_mode != 'train':
         raise ValueError(f"Unknown adaptation model mode: {model_mode}")
+    model.train()
     model.requires_grad_(False)
 
     params, names = collect_params(model, adaptation_mode)
@@ -364,51 +351,27 @@ def setup_eata(model, fishers=None, lr=1e-3, steps=1, episodic=False,
 
 
 # ============================================================================
-# ProtoTTA  (proto_imp_conf_v3 — best variant)
+# ProtoTTA
 # ============================================================================
 # ProtoPFormer does NOT expose sub-prototype similarities like ProtoViT.
 # Its prototype activations come from distance_2_similarity(distances), where
 # `distances` is shape (B, num_prototypes, H, W).
-# We use the global-max-pooled activations as "similarities" ∈ (0, 1).
-#
-# proto_imp_conf_v3 config (from evaluate_robustness.py):
-#   use_importance=True, use_confidence=True
-#   use_geometric_filter=True, geo_filter_threshold=0.92
-#   consensus_strategy='top_k_mean', consensus_ratio=0.5
-#   adaptation_mode='layernorm_attn_bias'
-#   use_ensemble_entropy=False  ← v3 distinction
-#   reset_mode=None (no reset)
+# We use the global-max-pooled activations as "similarities".
 # ============================================================================
 
 class ProtoTTA(nn.Module):
     """ProtoTTA for ProtoPFormer — prototype-similarity entropy minimisation.
 
-    Implements the full proto_imp_conf_v3 variant:
-      - Importance weighting (last_layer weights)
-      - Confidence weighting (softmax confidence)
-      - Geometric filtering (filter samples far from all prototypes)
-      - Consensus aggregation (top-k mean over spatial prototype activations)
-      - No ensemble entropy (v3)
+    Binary entropy of the predicted-class prototype activations of both
+    branches, blended with output entropy, after geometric filtering of
+    unreliable samples and with confidence weighting. The blend uses either a
+    fixed lambda or the sample-wise adaptive controller.
     """
 
     def __init__(self, model, optimizer,
-                 steps=1, episodic=False,
-                 # Importance & confidence
+                 steps=1,
                  use_importance=True,
-                 use_confidence=True,
-                 adapt_all_prototypes=False,
-                 # Geometric filter
-                 use_geometric_filter=True,
                  geo_filter_threshold=0.3,
-                 # Consensus
-                 consensus_strategy='max',
-                 consensus_ratio=0.5,
-                 # Reset
-                 reset_mode=None,
-                 reset_frequency=10,
-                 confidence_threshold=0.7,
-                 ema_alpha=0.999,
-                 use_branch_agreement=False,
                  prototype_branch='both',
                  similarity_mapping='sigmoid',
                  sigmoid_center=2.0,
@@ -418,52 +381,26 @@ class ProtoTTA(nn.Module):
                  shared_confidence_weighting=False,
                  gradient_normalize=False,
                  adaptive_lambda=False,
-                 adaptive_lambda_strategy='relative_reliability',
+                 adaptive_lambda_strategy=None,
                  adaptive_delta0=0.25,
                  adaptive_topk=3,
                  router_min_consistency=0.25,
-                 lambda_ema_momentum=0.9,
                  lambda_min=0.05,
                  lambda_max=0.95,
                  record_diagnostics=False,
-                 lambda_search=False,
-                 lambda_search_radius=0.1,
-                 lambda_search_teacher_temp=0.5,
-                 lambda_search_min_improvement=0.0,
-                 samplewise_lambda=False,
-                 adaptive_branch_weighting=False,
-                 branch_weight_floor=0.1,
-                 semantic_local_weights=None,
-                 semantic_global_weights=None,
-                 semantic_logit_blend=0.0,
-                 semantic_fusion='fixed',
-                 semantic_output_only=False,
-                 semantic_quality_normalization='none',
-                 semantic_contrast_weight=0.0,
-                 semantic_temperature=0.25,
                  record_vlm_evidence=False,
                  ):
         super().__init__()
+        if prototype_branch != 'both':
+            raise ValueError(f"Unsupported prototype_branch: {prototype_branch}")
+        if similarity_mapping != 'sigmoid':
+            raise ValueError(f"Unknown similarity_mapping: {similarity_mapping}")
         self.model = model
         self.optimizer = optimizer
         self.steps = steps
-        self.episodic = episodic
 
         self.use_importance = use_importance
-        self.use_confidence = use_confidence
-        self.adapt_all_prototypes = adapt_all_prototypes
-        self.use_geometric_filter = use_geometric_filter
         self.geo_filter_threshold = geo_filter_threshold
-        self.consensus_strategy = consensus_strategy
-        self.consensus_ratio = consensus_ratio
-
-        self.reset_mode = 'episodic' if episodic else (reset_mode or 'none')
-        self.reset_frequency = reset_frequency
-        self.confidence_threshold = confidence_threshold
-        self.ema_alpha = ema_alpha
-        self.use_branch_agreement = use_branch_agreement
-        self.prototype_branch = prototype_branch
-        self.similarity_mapping = similarity_mapping
         self.sigmoid_center = sigmoid_center
         self.sigmoid_temp = sigmoid_temp
         self.proto_weight = proto_weight
@@ -475,82 +412,18 @@ class ProtoTTA(nn.Module):
         self.adaptive_delta0 = adaptive_delta0
         self.adaptive_topk = adaptive_topk
         self.router_min_consistency = router_min_consistency
-        self.lambda_ema_momentum = lambda_ema_momentum
         self.lambda_min = lambda_min
         self.lambda_max = lambda_max
         self.record_diagnostics = record_diagnostics
-        self.lambda_search = lambda_search
-        self.lambda_search_radius = lambda_search_radius
-        self.lambda_search_teacher_temp = lambda_search_teacher_temp
-        self.lambda_search_min_improvement = lambda_search_min_improvement
-        self.samplewise_lambda = samplewise_lambda
-        self.adaptive_branch_weighting = adaptive_branch_weighting
-        self.branch_weight_floor = branch_weight_floor
-        self.semantic_logit_blend = float(semantic_logit_blend)
-        if semantic_fusion not in ('fixed', 'confidence_guard'):
-            raise ValueError(f'Unknown semantic fusion strategy: {semantic_fusion}')
-        self.semantic_fusion = semantic_fusion
-        self.semantic_output_only = bool(semantic_output_only)
-        if semantic_quality_normalization not in ('none', 'class_mean'):
-            raise ValueError(
-                f'Unknown semantic quality normalization: '
-                f'{semantic_quality_normalization}'
-            )
-        self.semantic_quality_normalization = semantic_quality_normalization
-        self.semantic_contrast_weight = float(semantic_contrast_weight)
-        self.semantic_temperature = float(semantic_temperature)
         self.record_vlm_evidence = bool(record_vlm_evidence)
         self.last_vlm_evidence = None
-        if semantic_local_weights is None:
-            semantic_local_weights = torch.ones(model.num_prototypes)
-            self.use_semantic_local_weights = False
-        else:
-            self.use_semantic_local_weights = True
-        semantic_local_weights = torch.as_tensor(
-            semantic_local_weights, dtype=torch.float32
-        ).clamp(0.05, 1.0)
-        if semantic_quality_normalization == 'class_mean':
-            local_identity = model.prototype_class_identity.argmax(dim=1).cpu()
-            for class_index in local_identity.unique():
-                mask = local_identity == class_index
-                semantic_local_weights[mask] /= semantic_local_weights[mask].mean()
-        self.register_buffer('semantic_local_weights', semantic_local_weights)
-        global_count = int(getattr(model, 'num_prototypes_global', 0))
-        if semantic_global_weights is None:
-            semantic_global_weights = torch.ones(global_count)
-            self.use_semantic_global_weights = False
-        else:
-            self.use_semantic_global_weights = True
-        semantic_global_weights = torch.as_tensor(
-            semantic_global_weights, dtype=torch.float32
-        ).clamp(0.05, 1.0)
-        if (semantic_quality_normalization == 'class_mean'
-                and semantic_global_weights.numel()
-                and hasattr(model, 'prototype_class_identity_global')):
-            global_identity = model.prototype_class_identity_global.argmax(dim=1).cpu()
-            for class_index in global_identity.unique():
-                mask = global_identity == class_index
-                semantic_global_weights[mask] /= semantic_global_weights[mask].mean()
-        self.register_buffer('semantic_global_weights', semantic_global_weights)
-        self.lambda_ema = None
-        self.router_proto_ema = None
-        self.router_output_ema = None
-
-        self.model_state, self.optimizer_state = \
-            copy_model_and_optimizer(model, optimizer)
-
-        epsilon = float(getattr(model, 'epsilon', 1e-4))
-        self.similarity_scale = max(-math.log(epsilon), 1.0)
 
         self.batch_count = 0
-        self.confidence_history = []
-        self.ema_state = None
 
         self.adaptation_stats = {
             'total_samples': 0,
             'adapted_samples': 0,
             'total_updates': 0,
-            'branch_agreement_samples': 0,
             'avg_reliability': [],
             'proto_loss': [],
             'output_loss': [],
@@ -560,13 +433,6 @@ class ProtoTTA(nn.Module):
             'adaptive_lambda_raw': [],
             'proto_signal_reliability': [],
             'output_signal_reliability': [],
-            'lambda_search_selected': [],
-            'lambda_search_base_score': [],
-            'lambda_search_selected_score': [],
-            'lambda_search_accepted': 0,
-            'lambda_search_rejected': 0,
-            'adaptive_local_branch_weight': [],
-            'adaptive_global_branch_weight': [],
             'proto_gradient_consistency': [],
             'output_gradient_consistency': [],
             'adaptive_router_gate': [],
@@ -577,15 +443,12 @@ class ProtoTTA(nn.Module):
     # -------------------------------------------------------------------------
 
     def forward(self, x):
-        if self._should_reset(x):
-            self.reset()
-
         self.adaptation_stats['total_samples'] += x.size(0)
 
         for _ in range(self.steps):
             logits = self._forward_and_adapt(x)
 
-        self._update_tracking(logits)
+        self.batch_count += 1
         return logits
 
     # -------------------------------------------------------------------------
@@ -597,8 +460,6 @@ class ProtoTTA(nn.Module):
         # --- 1. Forward pass (train mode gives richer output) ---
         out = self.model(x)
         logits = _get_logits(out)
-        native_logits = logits
-        prediction_logits = logits
 
         local_raw, global_raw = self._get_proto_activations(out)
         if local_raw is None:
@@ -614,51 +475,12 @@ class ProtoTTA(nn.Module):
         global_scores = self._normalize_similarity(global_raw) if global_raw is not None else None
         if self.record_vlm_evidence:
             self.last_vlm_evidence = {
-                'logits': native_logits.detach().float().cpu(),
+                'logits': logits.detach().float().cpu(),
                 'local_raw': local_raw.detach().float().cpu(),
                 'global_raw': (
                     None if global_raw is None else global_raw.detach().float().cpu()
                 ),
             }
-        local_semantic_quality = self.semantic_local_weights.to(local_raw.device)
-        global_semantic_quality = self.semantic_global_weights.to(local_raw.device)
-
-        if self.semantic_logit_blend > 0:
-            semantic_local = self.model.last_layer(
-                local_raw * local_semantic_quality.unsqueeze(0)
-            )
-            semantic_logits = semantic_local
-            if global_raw is not None and global_semantic_quality.numel():
-                semantic_global = self.model.last_layer_global(
-                    global_raw * global_semantic_quality.unsqueeze(0)
-                )
-                global_coe = float(getattr(self.model, 'global_coe', 0.5))
-                semantic_logits = (
-                    (1.0 - global_coe) * semantic_local
-                    + global_coe * semantic_global
-                )
-            alpha = self.semantic_logit_blend
-            if self.semantic_fusion == 'confidence_guard':
-                # Exact frozen rule used by the winning ProtoViT variant:
-                # retain a conflicting semantic prediction only when its class
-                # margin is at least as strong as the native prediction.
-                with torch.no_grad():
-                    native_prob = logits.float().softmax(dim=1)
-                    semantic_prob = semantic_logits.float().softmax(dim=1)
-                    native_margin = native_prob.topk(2, dim=1).values.diff(dim=1).abs().squeeze(1)
-                    semantic_margin = semantic_prob.topk(2, dim=1).values.diff(dim=1).abs().squeeze(1)
-                    disagree = logits.argmax(dim=1).ne(semantic_logits.argmax(dim=1))
-                    accept = (~disagree) | (semantic_margin >= native_margin)
-                    alpha = logits.new_full((logits.shape[0], 1), alpha) * accept.unsqueeze(1)
-            prediction_logits = (1.0 - alpha) * logits + alpha * semantic_logits
-            logits = native_logits if self.semantic_output_only else prediction_logits
-
-        if self.prototype_branch == 'local':
-            global_raw = None
-            global_scores = None
-        elif self.prototype_branch == 'global':
-            local_raw = None
-            local_scores = None
 
         with torch.no_grad():
             pred_class = logits.argmax(dim=1)
@@ -667,60 +489,42 @@ class ProtoTTA(nn.Module):
                 local_pci = self.model.prototype_class_identity.to(logits.device)
                 local_proto_identities = local_pci.argmax(dim=1)
 
-            branch_agreement = torch.ones_like(pred_class, dtype=torch.bool)
-            local_branch_pred = None
-            if local_raw is not None:
-                local_branch_pred = self.model.last_layer(local_raw).argmax(dim=1)
             global_proto_identities = None
-
             if global_scores is not None and hasattr(self.model, 'prototype_class_identity_global'):
                 global_pci = self.model.prototype_class_identity_global.to(logits.device)
                 global_proto_identities = global_pci.argmax(dim=1)
-                global_branch_pred = self.model.last_layer_global(global_raw).argmax(dim=1)
-                if self.use_branch_agreement and local_branch_pred is not None:
-                    branch_agreement = (local_branch_pred == pred_class) & (global_branch_pred == pred_class)
-                self.adaptation_stats['branch_agreement_samples'] += int(branch_agreement.sum().item())
 
         # --- 3. Geometric filter ---
-        if self.use_geometric_filter:
-            with torch.no_grad():
-                if local_scores is not None:
-                    reliability_score = local_scores.max(dim=1)[0]
-                else:
-                    reliability_score = global_scores.max(dim=1)[0]
+        with torch.no_grad():
+            if local_scores is not None:
+                reliability_score = local_scores.max(dim=1)[0]
+            else:
+                reliability_score = global_scores.max(dim=1)[0]
 
-                if local_scores is not None and global_scores is not None:
-                    local_max_sim = local_scores.max(dim=1)[0]
-                    global_max_sim = global_scores.max(dim=1)[0]
-                    global_coe = float(getattr(self.model, 'global_coe', 0.5))
-                    reliability_score = ((1.0 - global_coe) * local_max_sim +
-                                         global_coe * global_max_sim)
-                reliable_mask = (reliability_score > self.geo_filter_threshold)
-                if self.use_branch_agreement:
-                    reliable_mask = reliable_mask & branch_agreement
-                reliable_mask = reliable_mask.float()
-                
-                # Debug logging (every 50 batches)
-                if self.batch_count % 50 == 0 and self.batch_count > 0:
-                     print(f" [Batch {self.batch_count + 1}] Max Sim Avg: {reliability_score.mean():.3f}, Threshold: {self.geo_filter_threshold}")
+            if local_scores is not None and global_scores is not None:
+                local_max_sim = local_scores.max(dim=1)[0]
+                global_max_sim = global_scores.max(dim=1)[0]
+                global_coe = float(getattr(self.model, 'global_coe', 0.5))
+                reliability_score = ((1.0 - global_coe) * local_max_sim +
+                                     global_coe * global_max_sim)
+            reliable_mask = (reliability_score > self.geo_filter_threshold)
+            reliable_mask = reliable_mask.float()
 
-                adapted = int(reliable_mask.sum().item())
-                self.adaptation_stats['adapted_samples'] += adapted
-                self.adaptation_stats['avg_reliability'].append(float(reliability_score.mean().item()))
-                if reliable_mask.sum() == 0:
-                    if self.semantic_output_only:
-                        return prediction_logits
-                    # If whole batch is filtered, run in eval mode to avoid BN artifacts
-                    was_training = self.model.training
-                    self.model.eval()
-                    with torch.no_grad():
-                        out_eval = self.model(x)
-                    self.model.train(was_training)
-                    return _get_logits(out_eval)
-        else:
-            reliable_mask = torch.ones(x.size(0), device=x.device)
-            adapted = x.size(0)
+            # Debug logging (every 50 batches)
+            if self.batch_count % 50 == 0 and self.batch_count > 0:
+                 print(f" [Batch {self.batch_count + 1}] Max Sim Avg: {reliability_score.mean():.3f}, Threshold: {self.geo_filter_threshold}")
+
+            adapted = int(reliable_mask.sum().item())
             self.adaptation_stats['adapted_samples'] += adapted
+            self.adaptation_stats['avg_reliability'].append(float(reliability_score.mean().item()))
+            if reliable_mask.sum() == 0:
+                # If whole batch is filtered, run in eval mode to avoid BN artifacts
+                was_training = self.model.training
+                self.model.eval()
+                with torch.no_grad():
+                    out_eval = self.model(x)
+                self.model.train(was_training)
+                return _get_logits(out_eval)
 
         sample_w = reliable_mask.unsqueeze(1)  # (B, 1)
 
@@ -734,11 +538,6 @@ class ProtoTTA(nn.Module):
                 proto_identities=local_proto_identities,
                 classifier=self.model.last_layer,
                 sample_w=sample_w,
-                semantic_weights=(
-                    local_semantic_quality
-                    if self.use_semantic_local_weights and not self.semantic_output_only
-                    else None
-                ),
             )
         if global_scores is not None and global_proto_identities is not None:
             global_loss_per_sample = self._branch_entropy_loss(
@@ -747,102 +546,27 @@ class ProtoTTA(nn.Module):
                 proto_identities=global_proto_identities,
                 classifier=self.model.last_layer_global,
                 sample_w=sample_w,
-                semantic_weights=(
-                    global_semantic_quality
-                    if self.use_semantic_global_weights and not self.semantic_output_only
-                    else None
-                ),
             )
-        local_branch_score = self._branch_activation_margin(
-            local_scores, pred_class, local_proto_identities
-        )
-        global_branch_score = self._branch_activation_margin(
-            global_scores, pred_class, global_proto_identities
-        )
-        local_branch_weight = None
-        global_branch_weight = None
         if local_loss_per_sample is None:
             loss_per_sample = global_loss_per_sample
-            global_branch_weight = torch.ones_like(loss_per_sample)
         elif global_loss_per_sample is None:
             loss_per_sample = local_loss_per_sample
-            local_branch_weight = torch.ones_like(loss_per_sample)
         else:
-            if self.adaptive_branch_weighting:
-                branch_ratio = local_branch_score / (
-                    local_branch_score + global_branch_score + 1e-8
-                )
-                floor = min(max(self.branch_weight_floor, 0.0), 0.5)
-                local_branch_weight = (
-                    floor + (1.0 - 2.0 * floor) * branch_ratio
-                ).detach()
-                global_branch_weight = 1.0 - local_branch_weight
-                loss_per_sample = (
-                    local_branch_weight * local_loss_per_sample
-                    + global_branch_weight * global_loss_per_sample
-                )
-            else:
-                global_coe = float(getattr(self.model, 'global_coe', 0.5))
-                local_branch_weight = torch.full_like(local_loss_per_sample, 1.0 - global_coe)
-                global_branch_weight = torch.full_like(global_loss_per_sample, global_coe)
-                loss_per_sample = ((1.0 - global_coe) * local_loss_per_sample +
-                                   global_coe * global_loss_per_sample)
+            global_coe = float(getattr(self.model, 'global_coe', 0.5))
+            loss_per_sample = ((1.0 - global_coe) * local_loss_per_sample +
+                               global_coe * global_loss_per_sample)
 
         # --- 5. Confidence weighting ---
-        if self.use_confidence:
-            with torch.no_grad():
-                probs      = logits.softmax(dim=1)
-                confidence = probs.max(dim=1)[0]
-            proto_sample_loss = loss_per_sample * confidence * reliable_mask
-            proto_loss = proto_sample_loss.sum() / \
-                         (reliable_mask.sum() + 1e-8)
-        else:
-            proto_sample_loss = loss_per_sample * reliable_mask
-            proto_loss = proto_sample_loss.sum() / \
-                         (reliable_mask.sum() + 1e-8)
-
-        # Actively concentrate predicted-class evidence on prototypes that the
-        # offline VLM audit judged semantically meaningful.
-        if self.semantic_contrast_weight > 0:
-            semantic_losses = []
-            semantic_weights_by_branch = []
-            for scores, identities, quality, branch_weight in (
-                    (local_scores, local_proto_identities,
-                     local_semantic_quality, local_branch_weight),
-                    (global_scores, global_proto_identities,
-                     global_semantic_quality, global_branch_weight)):
-                if scores is None or identities is None or quality.numel() == 0:
-                    continue
-                target = identities.unsqueeze(0).eq(pred_class.unsqueeze(1))
-                distribution = F.softmax(
-                    (scores / max(self.semantic_temperature, 1e-6)).masked_fill(
-                        ~target, float('-inf')
-                    ), dim=1,
-                )
-                expected_quality = (
-                    distribution * quality.unsqueeze(0)
-                ).sum(dim=1).clamp_min(1e-6)
-                semantic_losses.append(-torch.log(expected_quality))
-                semantic_weights_by_branch.append(branch_weight)
-            if semantic_losses:
-                if len(semantic_losses) == 1:
-                    semantic_per_sample = semantic_losses[0]
-                else:
-                    semantic_per_sample = (
-                        semantic_weights_by_branch[0] * semantic_losses[0]
-                        + semantic_weights_by_branch[1] * semantic_losses[1]
-                    )
-                semantic_sample_weight = reliable_mask
-                if self.use_confidence:
-                    semantic_sample_weight = semantic_sample_weight * confidence
-                semantic_loss = (
-                    semantic_per_sample * semantic_sample_weight
-                ).sum() / semantic_sample_weight.sum().clamp_min(1e-8)
-                proto_loss = proto_loss + self.semantic_contrast_weight * semantic_loss
+        with torch.no_grad():
+            probs      = logits.softmax(dim=1)
+            confidence = probs.max(dim=1)[0]
+        proto_sample_loss = loss_per_sample * confidence * reliable_mask
+        proto_loss = proto_sample_loss.sum() / \
+                     (reliable_mask.sum() + 1e-8)
 
         entropy_per_sample = softmax_entropy(logits)
         logit_sample_weight = reliable_mask
-        if self.shared_confidence_weighting and self.use_confidence:
+        if self.shared_confidence_weighting:
             logit_sample_weight = logit_sample_weight * confidence
         output_sample_loss = entropy_per_sample * logit_sample_weight
         logit_loss = output_sample_loss.sum() / \
@@ -869,17 +593,10 @@ class ProtoTTA(nn.Module):
             if self.adaptive_lambda_strategy == 'mean_act_rel':
                 # Simplest label-free combination: sample-wise average of the
                 # two estimates, with no gradient routing.
-                if self.adaptive_branch_weighting and local_branch_score is not None \
-                        and global_branch_score is not None:
-                    native_score = (
-                        local_branch_weight * local_branch_score
-                        + global_branch_weight * global_branch_score
-                    )
-                else:
-                    native_score = self._prototype_activation_margin(
-                        local_scores, global_scores, pred_class,
-                        local_proto_identities, global_proto_identities,
-                    )
+                native_score = self._prototype_activation_margin(
+                    local_scores, global_scores, pred_class,
+                    local_proto_identities, global_proto_identities,
+                )
                 relative_score, proto_reliability, output_reliability = \
                     relative_evidence_lambda(
                         logits=logits,
@@ -891,20 +608,9 @@ class ProtoTTA(nn.Module):
                     )
                 adaptive_score = 0.5 * (native_score + relative_score)
             elif self.adaptive_lambda_strategy == 'activation_margin':
-                if self.adaptive_branch_weighting and local_branch_score is not None \
-                        and global_branch_score is not None:
-                    adaptive_score = (
-                        local_branch_weight * local_branch_score
-                        + global_branch_weight * global_branch_score
-                    )
-                else:
-                    adaptive_score = self._prototype_activation_margin(
-                        local_scores, global_scores, pred_class,
-                        local_proto_identities, global_proto_identities,
-                    )
-            elif self.adaptive_lambda_strategy == 'relative_reliability':
-                adaptive_score = proto_reliability / (
-                    proto_reliability + output_reliability + 1e-8
+                adaptive_score = self._prototype_activation_margin(
+                    local_scores, global_scores, pred_class,
+                    local_proto_identities, global_proto_identities,
                 )
             elif self.adaptive_lambda_strategy == 'relative_evidence':
                 adaptive_score, proto_reliability, output_reliability = \
@@ -916,48 +622,13 @@ class ProtoTTA(nn.Module):
                         ),
                         topk=self.adaptive_topk,
                     )
-            elif self.adaptive_lambda_strategy == 'gradient_consistency':
-                proto_gradient_consistency = self._gradient_consistency(
-                    proto_sample_loss, reliable_mask
-                )
-                output_gradient_consistency = self._gradient_consistency(
-                    output_sample_loss, reliable_mask
-                )
-                denominator = (
-                    proto_gradient_consistency + output_gradient_consistency
-                )
-                if denominator.item() <= 1e-8:
-                    gradient_lambda = self.lambda_ema if self.lambda_ema is not None else 0.5
-                    gradient_lambda = logits.new_tensor(float(gradient_lambda))
-                else:
-                    gradient_lambda = proto_gradient_consistency / denominator
-                adaptive_score = torch.full_like(
-                    output_reliability, float(gradient_lambda.item())
-                )
-                proto_reliability = torch.full_like(
-                    proto_reliability, float(proto_gradient_consistency.item())
-                )
-                output_reliability = torch.full_like(
-                    output_reliability, float(output_gradient_consistency.item())
-                )
             elif self.adaptive_lambda_strategy in (
-                    'source_free_router',
                     'source_free_router_absolute',
-                    'source_free_router_evidence',
-                    'source_free_router_coverage',
-                    'source_free_router_coverage_absolute',
-                    'source_free_router_coverage_ema'):
-                if self.adaptive_branch_weighting and local_branch_score is not None \
-                        and global_branch_score is not None:
-                    native_score = (
-                        local_branch_weight * local_branch_score
-                        + global_branch_weight * global_branch_score
-                    )
-                else:
-                    native_score = self._prototype_activation_margin(
-                        local_scores, global_scores, pred_class,
-                        local_proto_identities, global_proto_identities,
-                    )
+                    'source_free_router_coverage_absolute'):
+                native_score = self._prototype_activation_margin(
+                    local_scores, global_scores, pred_class,
+                    local_proto_identities, global_proto_identities,
+                )
                 relative_score, relative_proto_rel, relative_output_rel = \
                     relative_evidence_lambda(
                         logits=logits,
@@ -977,55 +648,12 @@ class ProtoTTA(nn.Module):
                     proto_gradient_consistency
                     >= 2.0 * output_gradient_consistency.clamp_min(1e-8)
                 )
-                if self.adaptive_lambda_strategy in (
-                        'source_free_router_absolute',
-                        'source_free_router_coverage_absolute'):
-                    gradient_gate = gradient_gate & (
-                        proto_gradient_consistency
-                        >= self.router_min_consistency
-                    )
+                gradient_gate = gradient_gate & (
+                    proto_gradient_consistency
+                    >= self.router_min_consistency
+                )
                 if self.adaptive_lambda_strategy == \
-                        'source_free_router_coverage_ema':
-                    # Stabilize the source-free gradient comparison over the
-                    # current corruption stream. Both EMAs use the same decay,
-                    # so their ratio is not biased by a common scale factor.
-                    momentum = min(1.0, max(0.0, self.lambda_ema_momentum))
-                    if self.router_proto_ema is None:
-                        self.router_proto_ema = float(
-                            proto_gradient_consistency.item()
-                        )
-                        self.router_output_ema = float(
-                            output_gradient_consistency.item()
-                        )
-                    else:
-                        self.router_proto_ema = (
-                            momentum * self.router_proto_ema
-                            + (1.0 - momentum)
-                            * float(proto_gradient_consistency.item())
-                        )
-                        self.router_output_ema = (
-                            momentum * self.router_output_ema
-                            + (1.0 - momentum)
-                            * float(output_gradient_consistency.item())
-                        )
-                    gradient_gate = logits.new_tensor(
-                        self.router_proto_ema
-                        >= 2.0 * max(self.router_output_ema, 1e-8),
-                        dtype=torch.bool,
-                    )
-                if self.adaptive_lambda_strategy == 'source_free_router_evidence':
-                    # Output confidence can be saturated under corruption.  In
-                    # that case retain the prototype-native controller wherever
-                    # prototypes still provide strong class-relative evidence.
-                    guard = (
-                        (relative_output_rel >= 0.90)
-                        & (relative_proto_rel >= 0.40)
-                    )
-                    native_gate = guard | bool(gradient_gate.item())
-                elif self.adaptive_lambda_strategy in (
-                        'source_free_router_coverage',
-                        'source_free_router_coverage_absolute',
-                        'source_free_router_coverage_ema'):
+                        'source_free_router_coverage_absolute':
                     # Sparse acceptance by the independent geometric filter is
                     # evidence against trusting a saturated output margin.
                     reliable_fraction = reliable_mask.float().mean()
@@ -1056,20 +684,10 @@ class ProtoTTA(nn.Module):
                 self.lambda_min, self.lambda_max
             )
             current_lambda = adaptive_lambda_per_sample[valid].mean().item()
-            if self.samplewise_lambda:
-                # Preserve sample-level reliability rather than collapsing it
-                # to one batch coefficient. The reported coefficient remains
-                # the reliable-sample mean for diagnostics.
-                proto_weight = current_lambda
-                logit_weight = 1.0 - proto_weight
-            else:
-                if self.lambda_ema is None:
-                    self.lambda_ema = current_lambda
-                else:
-                    self.lambda_ema = (self.lambda_ema_momentum * self.lambda_ema +
-                                       (1.0 - self.lambda_ema_momentum) * current_lambda)
-                proto_weight = min(self.lambda_max, max(self.lambda_min, self.lambda_ema))
-                logit_weight = 1.0 - proto_weight
+            # Sample-level coefficients enter the loss below; the reported
+            # coefficient is the reliable-sample mean for diagnostics.
+            proto_weight = current_lambda
+            logit_weight = 1.0 - proto_weight
 
         need_grad_norms = self.gradient_normalize or self.record_diagnostics
         proto_grad_norm = self._gradient_norm(proto_loss) if need_grad_norms else None
@@ -1080,29 +698,7 @@ class ProtoTTA(nn.Module):
             proto_term = proto_loss / (proto_grad_norm.detach() + 1e-8)
             output_term = logit_loss / (output_grad_norm.detach() + 1e-8)
 
-        search_result = None
-        if self.lambda_search:
-            if not self.adaptive_lambda:
-                raise ValueError('lambda_search requires adaptive_lambda=True')
-            search_result = self._select_and_apply_lambda_update(
-                x=x,
-                base_lambda=proto_weight,
-                proto_term=proto_term,
-                output_term=output_term,
-            )
-            if search_result['accepted']:
-                proto_weight = search_result['selected_lambda']
-                logit_weight = 1.0 - proto_weight
-                self.adaptation_stats['total_updates'] += 1
-                self.adaptation_stats['lambda_search_accepted'] += 1
-            else:
-                # This batch contributed no parameter update.
-                self.adaptation_stats['adapted_samples'] -= adapted
-                self.adaptation_stats['lambda_search_rejected'] += 1
-
-        if self.samplewise_lambda:
-            if adaptive_lambda_per_sample is None:
-                raise ValueError('samplewise_lambda requires adaptive_lambda=True')
+        if self.adaptive_lambda:
             proto_sample_term = proto_sample_loss
             output_sample_term = output_sample_loss
             if self.gradient_normalize:
@@ -1137,42 +733,16 @@ class ProtoTTA(nn.Module):
                     float(output_gradient_consistency.item())
                 )
                 self.adaptation_stats['adaptive_router_gate'].append(
-                    float(
-                        router_gate_fraction
-                        if router_gate_fraction is not None else
-                        (proto_gradient_consistency.item() >= 2.0 * max(
-                            output_gradient_consistency.item(), 1e-8
-                        ))
-                    )
-                )
-            if local_branch_weight is not None:
-                self.adaptation_stats['adaptive_local_branch_weight'].append(
-                    float(local_branch_weight[valid].mean().detach().item())
-                )
-            if global_branch_weight is not None:
-                self.adaptation_stats['adaptive_global_branch_weight'].append(
-                    float(global_branch_weight[valid].mean().detach().item())
-                )
-            if search_result is not None:
-                selected = search_result['selected_lambda']
-                self.adaptation_stats['lambda_search_selected'].append(
-                    None if selected is None else float(selected)
-                )
-                self.adaptation_stats['lambda_search_base_score'].append(
-                    float(search_result['base_score'])
-                )
-                self.adaptation_stats['lambda_search_selected_score'].append(
-                    float(search_result['selected_score'])
+                    float(router_gate_fraction)
                 )
 
         # --- 6. Backward ---
-        if not self.lambda_search:
-            total_loss.backward()
-            self.optimizer.step()
-            self.optimizer.zero_grad()
-            self.adaptation_stats['total_updates'] += 1
+        total_loss.backward()
+        self.optimizer.step()
+        self.optimizer.zero_grad()
+        self.adaptation_stats['total_updates'] += 1
 
-        return prediction_logits if self.semantic_output_only else logits
+        return logits
 
     # -------------------------------------------------------------------------
     # Helpers
@@ -1211,18 +781,11 @@ class ProtoTTA(nn.Module):
         if raw_scores is None:
             return None
         raw_scores = F.relu(raw_scores)
-        if self.similarity_mapping == 'linear':
-            return torch.clamp(raw_scores / self.similarity_scale, 0.0, 1.0)
-        if self.similarity_mapping == 'sigmoid':
-            return torch.sigmoid((raw_scores - self.sigmoid_center) / max(self.sigmoid_temp, 1e-6))
-        raise ValueError(f"Unknown similarity_mapping: {self.similarity_mapping}")
+        return torch.sigmoid((raw_scores - self.sigmoid_center) / max(self.sigmoid_temp, 1e-6))
 
     def _branch_entropy_loss(self, sim_scores, pred_class, proto_identities,
-                             classifier, sample_w, semantic_weights=None):
-        if self.adapt_all_prototypes:
-            target_mask = torch.ones_like(sim_scores)
-        else:
-            target_mask = (proto_identities.unsqueeze(0) == pred_class.unsqueeze(1)).float()
+                             classifier, sample_w):
+        target_mask = (proto_identities.unsqueeze(0) == pred_class.unsqueeze(1)).float()
         eps = 1e-6
         proto_probs = torch.clamp(sim_scores * target_mask, eps, 1.0 - eps)
         entropy = -(proto_probs * torch.log(proto_probs) +
@@ -1231,16 +794,10 @@ class ProtoTTA(nn.Module):
         if self.use_importance:
             class_w = classifier.weight[pred_class]
             imp = torch.abs(class_w) * target_mask
-            if semantic_weights is not None:
-                imp = imp * semantic_weights.unsqueeze(0)
             imp = imp / (imp.sum(dim=1, keepdim=True) + 1e-8)
             weighted_entropy = entropy * target_mask * imp * sample_w
             return weighted_entropy.sum(dim=1)
 
-        if semantic_weights is not None:
-            imp = semantic_weights.unsqueeze(0) * target_mask
-            imp = imp / imp.sum(dim=1, keepdim=True).clamp_min(1e-8)
-            return (entropy * imp * sample_w).sum(dim=1)
         masked_e = entropy * target_mask * sample_w
         return masked_e.sum(dim=1) / (target_mask.sum(dim=1) + 1e-8)
 
@@ -1348,148 +905,13 @@ class ProtoTTA(nn.Module):
                     seen.add(id(param))
         return params
 
-    @staticmethod
-    def _set_weighted_grads(params, proto_grads, output_grads, proto_weight):
-        for param, proto_grad, output_grad in zip(params, proto_grads, output_grads):
-            if proto_grad is None and output_grad is None:
-                param.grad = None
-                continue
-            grad = torch.zeros_like(param)
-            if proto_grad is not None:
-                grad.add_(proto_grad, alpha=proto_weight)
-            if output_grad is not None:
-                grad.add_(output_grad, alpha=1.0 - proto_weight)
-            param.grad = grad
-
-    def _restore_search_state(self, params, param_state, optimizer_state):
-        with torch.no_grad():
-            for param, value in zip(params, param_state):
-                param.copy_(value)
-        self.optimizer.load_state_dict(deepcopy(optimizer_state))
-        self.optimizer.zero_grad()
-
-    def _search_score(self, teacher_probs, candidate_logits):
-        """Cross-view soft pseudo-label score; lower is better."""
-        candidate_log_probs = candidate_logits.log_softmax(dim=1)
-        return -(teacher_probs * candidate_log_probs).sum(dim=1).mean()
-
-    def _select_and_apply_lambda_update(self, x, base_lambda, proto_term, output_term):
-        """Select a local lambda by virtual Adam updates and commit it safely.
-
-        The candidates are ``lambda_hat +/- radius`` and ``lambda_hat``.  Each
-        virtual update starts from the exact same model and optimizer state.
-        It is scored on a deterministic horizontal-flip view against a frozen,
-        sharpened pre-update teacher.  The unchanged model is an explicit
-        candidate, so an update is committed only when it improves this
-        label-free cross-view score.
-        """
-        params = self._optimizer_params()
-        proto_grads = torch.autograd.grad(
-            proto_term, params, retain_graph=True, allow_unused=True
-        )
-        output_grads = torch.autograd.grad(
-            output_term, params, retain_graph=False, allow_unused=True
-        )
-        proto_grads = tuple(None if grad is None else grad.detach() for grad in proto_grads)
-        output_grads = tuple(None if grad is None else grad.detach() for grad in output_grads)
-
-        param_state = [param.detach().clone() for param in params]
-        optimizer_state = deepcopy(self.optimizer.state_dict())
-        was_training = self.model.training
-        search_view = torch.flip(x, dims=(-1,))
-
-        self.model.eval()
-        with torch.no_grad():
-            teacher_logits = _get_logits(self.model(x))
-            teacher_probs = (
-                teacher_logits / max(self.lambda_search_teacher_temp, 1e-6)
-            ).softmax(dim=1)
-            base_logits = _get_logits(self.model(search_view))
-            base_score = float(self._search_score(teacher_probs, base_logits).item())
-
-        candidates = sorted({
-            min(self.lambda_max, max(self.lambda_min, base_lambda - self.lambda_search_radius)),
-            min(self.lambda_max, max(self.lambda_min, base_lambda)),
-            min(self.lambda_max, max(self.lambda_min, base_lambda + self.lambda_search_radius)),
-        })
-        best_lambda = None
-        best_score = base_score
-
-        for candidate in candidates:
-            self._restore_search_state(params, param_state, optimizer_state)
-            self._set_weighted_grads(params, proto_grads, output_grads, candidate)
-            self.optimizer.step()
-            self.optimizer.zero_grad()
-            self.model.eval()
-            with torch.no_grad():
-                candidate_logits = _get_logits(self.model(search_view))
-                score = float(self._search_score(teacher_probs, candidate_logits).item())
-            if score < best_score - self.lambda_search_min_improvement:
-                best_score = score
-                best_lambda = float(candidate)
-
-        self._restore_search_state(params, param_state, optimizer_state)
-        if was_training:
-            self.model.train()
-        else:
-            self.model.eval()
-
-        accepted = best_lambda is not None
-        if accepted:
-            self._set_weighted_grads(params, proto_grads, output_grads, best_lambda)
-            self.optimizer.step()
-            self.optimizer.zero_grad()
-
-        return {
-            'accepted': accepted,
-            'selected_lambda': best_lambda,
-            'base_score': base_score,
-            'selected_score': best_score,
-        }
-
     def _consensus(self, similarities):
-        """Aggregate over the spatial patches (dim=2)."""
+        """Aggregate over the spatial patches (dim=2) by the maximum."""
         if similarities.dim() < 3:
             return similarities
 
         # similarities: [B, P, K]
-        if self.consensus_strategy == 'max':
-            agg = similarities.max(dim=2)[0]
-        elif self.consensus_strategy == 'top_k_mean':
-            K = similarities.shape[2]
-            top_k = max(1, int(K * self.consensus_ratio))
-            top_sims = torch.topk(similarities, k=top_k, dim=2)[0]
-            agg = top_sims.mean(dim=2)
-        else:
-            agg = similarities.mean(dim=2)
-        return agg
-
-    def _should_reset(self, x):
-        if self.reset_mode == 'episodic':
-            return True
-        if self.reset_mode == 'none':
-            return False
-        if self.reset_mode == 'periodic':
-            return self.batch_count > 0 and self.batch_count % self.reset_frequency == 0
-        if self.reset_mode == 'confidence':
-            if len(self.confidence_history) >= 5:
-                return (sum(self.confidence_history[-5:]) / 5) < self.confidence_threshold
-            return False
-        return False
-
-    def _update_tracking(self, logits):
-        self.batch_count += 1
-        with torch.no_grad():
-            probs = logits.softmax(dim=1)
-            self.confidence_history.append(probs.max(dim=1)[0].mean().item())
-            if len(self.confidence_history) > 50:
-                self.confidence_history = self.confidence_history[-50:]
-
-    def reset(self):
-        self.model.load_state_dict(self.model_state, strict=True)
-        self.lambda_ema = None
-        self.router_proto_ema = None
-        self.router_output_ema = None
+        return similarities.max(dim=2)[0]
 
     def forward_no_adapt(self, x):
         return _forward_eval(self.model, x)
@@ -1501,15 +923,10 @@ class ProtoTTA(nn.Module):
             return getattr(self.model, name)
 
 
-def setup_proto_tta(model, lr=1e-3, steps=1, episodic=False,
-                    use_importance=True, use_confidence=True,
-                    adapt_all_prototypes=False,
-                    use_geometric_filter=True, geo_filter_threshold=0.3,
-                    consensus_strategy='max', consensus_ratio=0.5,
+def setup_proto_tta(model, lr=1e-3, steps=1,
+                    use_importance=True,
+                    geo_filter_threshold=0.3,
                     adaptation_mode='layernorm_attn_bias',
-                    reset_mode=None, reset_frequency=10,
-                    confidence_threshold=0.7, ema_alpha=0.999,
-                    use_branch_agreement=False,
                     prototype_branch='both',
                     similarity_mapping='sigmoid',
                     sigmoid_center=2.0,
@@ -1519,29 +936,13 @@ def setup_proto_tta(model, lr=1e-3, steps=1, episodic=False,
                     shared_confidence_weighting=False,
                     gradient_normalize=False,
                     adaptive_lambda=False,
-                    adaptive_lambda_strategy='relative_reliability',
+                    adaptive_lambda_strategy=None,
                     adaptive_delta0=0.25,
                     adaptive_topk=3,
                     router_min_consistency=0.25,
-                    lambda_ema_momentum=0.9,
                     lambda_min=0.05,
                     lambda_max=0.95,
                     record_diagnostics=False,
-                    lambda_search=False,
-                    lambda_search_radius=0.1,
-                    lambda_search_teacher_temp=0.5,
-                    lambda_search_min_improvement=0.0,
-                    samplewise_lambda=False,
-                    adaptive_branch_weighting=False,
-                    branch_weight_floor=0.1,
-                    semantic_local_weights=None,
-                    semantic_global_weights=None,
-                    semantic_logit_blend=0.0,
-                    semantic_fusion='fixed',
-                    semantic_output_only=False,
-                    semantic_quality_normalization='none',
-                    semantic_contrast_weight=0.0,
-                    semantic_temperature=0.25,
                     record_vlm_evidence=False,
                     model_mode='train'):
     """Factory: configure + wrap model with ProtoTTA."""
@@ -1553,19 +954,9 @@ def setup_proto_tta(model, lr=1e-3, steps=1, episodic=False,
         params, _ = collect_params(model, 'layernorm_only')
     optimizer = torch.optim.Adam(params, lr=lr, betas=(0.9, 0.999))
     return ProtoTTA(
-        model, optimizer, steps=steps, episodic=episodic,
+        model, optimizer, steps=steps,
         use_importance=use_importance,
-        use_confidence=use_confidence,
-        adapt_all_prototypes=adapt_all_prototypes,
-        use_geometric_filter=use_geometric_filter,
         geo_filter_threshold=geo_filter_threshold,
-        consensus_strategy=consensus_strategy,
-        consensus_ratio=consensus_ratio,
-        reset_mode=reset_mode,
-        reset_frequency=reset_frequency,
-        confidence_threshold=confidence_threshold,
-        ema_alpha=ema_alpha,
-        use_branch_agreement=use_branch_agreement,
         prototype_branch=prototype_branch,
         similarity_mapping=similarity_mapping,
         sigmoid_center=sigmoid_center,
@@ -1579,24 +970,8 @@ def setup_proto_tta(model, lr=1e-3, steps=1, episodic=False,
         adaptive_delta0=adaptive_delta0,
         adaptive_topk=adaptive_topk,
         router_min_consistency=router_min_consistency,
-        lambda_ema_momentum=lambda_ema_momentum,
         lambda_min=lambda_min,
         lambda_max=lambda_max,
         record_diagnostics=record_diagnostics,
-        lambda_search=lambda_search,
-        lambda_search_radius=lambda_search_radius,
-        lambda_search_teacher_temp=lambda_search_teacher_temp,
-        lambda_search_min_improvement=lambda_search_min_improvement,
-        samplewise_lambda=samplewise_lambda,
-        adaptive_branch_weighting=adaptive_branch_weighting,
-        branch_weight_floor=branch_weight_floor,
-        semantic_local_weights=semantic_local_weights,
-        semantic_global_weights=semantic_global_weights,
-        semantic_logit_blend=semantic_logit_blend,
-        semantic_fusion=semantic_fusion,
-        semantic_output_only=semantic_output_only,
-        semantic_quality_normalization=semantic_quality_normalization,
-        semantic_contrast_weight=semantic_contrast_weight,
-        semantic_temperature=semantic_temperature,
         record_vlm_evidence=record_vlm_evidence,
     )
